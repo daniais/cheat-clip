@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { HeatmapTimeline } from './components/HeatmapTimeline';
 import { LanguageSwitcher } from './components/LanguageSwitcher';
 import { useLanguage } from './locales';
@@ -46,6 +46,55 @@ export default function App() {
   const [subtitlesSource, setSubtitlesSource] = useState<'youtube' | 'manual'>('youtube');
   const [manualSubtitlesContent, setManualSubtitlesContent] = useState<string>('');
   const [manualSubtitlesFileName, setManualSubtitlesFileName] = useState<string>('');
+
+  // Supadata API Quota states
+  interface SupadataKeyDetail {
+    index: number;
+    masked_key: string;
+    status: 'active' | 'exhausted' | 'error';
+    max_credits: number;
+    used_credits: number;
+    remaining_credits: number;
+    plan: string;
+  }
+
+  interface SupadataUsage {
+    total_keys: number;
+    total_limit: number;
+    total_used: number;
+    total_remaining: number;
+    usage_percent: number;
+    active_keys: number;
+    exhausted_keys: number;
+    keys_detail: SupadataKeyDetail[];
+    cached?: boolean;
+    timestamp?: number;
+  }
+
+  const [supadataUsage, setSupadataUsage] = useState<SupadataUsage | null>(null);
+  const [loadingSupadataUsage, setLoadingSupadataUsage] = useState<boolean>(false);
+  const [showKeyDetails, setShowKeyDetails] = useState<boolean>(false);
+
+  const fetchSupadataUsage = useCallback(async (force: boolean = false) => {
+    setLoadingSupadataUsage(true);
+    try {
+      const res = await fetch(`/api/supadata-usage${force ? '?refresh=true' : ''}`);
+      if (res.ok) {
+        const data: SupadataUsage = await res.json();
+        setSupadataUsage(data);
+      }
+    } catch (err) {
+      console.warn('Failed to retrieve Supadata API usage:', err);
+    } finally {
+      setLoadingSupadataUsage(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (subtitlesSource === 'youtube') {
+      fetchSupadataUsage();
+    }
+  }, [subtitlesSource, fetchSupadataUsage]);
 
   const parseTimeToSeconds = (val: string): number | null => {
     const clean = val.trim();
@@ -911,6 +960,9 @@ export default function App() {
 
       if (resultData.clips?.length > 0) setActiveClip(resultData.clips[0]);
       setTimeout(() => initPlayer(resultData!.video_id), 100);
+      if (subtitlesSource === 'youtube') {
+        fetchSupadataUsage(true);
+      }
 
       // Scroll smoothly to the dashboard so results are immediately visible
       setTimeout(() => {
@@ -1638,9 +1690,228 @@ Transcript:
             </div>
 
             {subtitlesSource === 'youtube' && (
-              <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', opacity: 0.8, display: 'block', marginTop: '0.15rem', lineHeight: '1.4' }}>
-                💡 <strong>{t.form.vercelSubtitlesTipTitle}</strong> {t.form.vercelSubtitlesTipDesc} <a href="https://downsub.com/" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--secondary)', textDecoration: 'underline', fontWeight: '500' }}>downsub.com</a> {t.form.andUploadOption}
-              </span>
+              <>
+                <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', opacity: 0.8, display: 'block', marginTop: '0.15rem', lineHeight: '1.4' }}>
+                  💡 <strong>{t.form.vercelSubtitlesTipTitle}</strong> {t.form.vercelSubtitlesTipDesc} <a href="https://downsub.com/" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--secondary)', textDecoration: 'underline', fontWeight: '500' }}>downsub.com</a> {t.form.andUploadOption}
+                </span>
+
+                {/* Supadata Cloud API Usage & Limit Monitor */}
+                <div className="supadata-card">
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.75rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      <span style={{ fontSize: '1rem' }}>⚡</span>
+                      <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--text-primary)', letterSpacing: '0.02em' }}>
+                        {t.form.supadataTitle}
+                      </span>
+                      {supadataUsage && (
+                        <span style={{
+                          fontSize: '0.7rem',
+                          fontWeight: 600,
+                          padding: '0.15rem 0.5rem',
+                          borderRadius: '12px',
+                          background: supadataUsage.total_remaining > 50 ? 'rgba(16, 185, 129, 0.15)' : supadataUsage.total_remaining > 0 ? 'rgba(245, 158, 11, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                          color: supadataUsage.total_remaining > 50 ? '#10b981' : supadataUsage.total_remaining > 0 ? '#f59e0b' : '#ef4444',
+                          border: `1px solid ${supadataUsage.total_remaining > 50 ? 'rgba(16, 185, 129, 0.3)' : supadataUsage.total_remaining > 0 ? 'rgba(245, 158, 11, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`
+                        }}>
+                          {supadataUsage.total_remaining > 50 ? `● ${t.form.supadataStatusNormal}` : supadataUsage.total_remaining > 0 ? `⚠️ ${t.form.supadataStatusLow}` : `🔴 ${t.form.supadataStatusDepleted}`}
+                        </span>
+                      )}
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                      {supadataUsage && (
+                        <button
+                          type="button"
+                          onClick={() => setShowKeyDetails(prev => !prev)}
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            color: 'var(--secondary)',
+                            cursor: 'pointer',
+                            fontSize: '0.75rem',
+                            fontWeight: 500,
+                            padding: '0.2rem 0.4rem'
+                          }}
+                        >
+                          {showKeyDetails ? t.form.supadataHideDetails : t.form.supadataShowDetails} {showKeyDetails ? '▲' : '▼'}
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="supadata-refresh-btn"
+                        onClick={() => fetchSupadataUsage(true)}
+                        disabled={loadingSupadataUsage}
+                        title={t.form.supadataRefresh}
+                      >
+                        <span className={loadingSupadataUsage ? "spinning-icon" : ""}>🔄</span>
+                        {loadingSupadataUsage ? t.form.supadataRefreshing : t.form.supadataRefresh}
+                      </button>
+                    </div>
+                  </div>
+
+                  {loadingSupadataUsage && !supadataUsage ? (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1.25rem 0', gap: '0.6rem', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                      <span className="spinning-icon">🔄</span>
+                      <span>{t.form.supadataRefreshing}</span>
+                    </div>
+                  ) : supadataUsage ? (
+                    <>
+                      {/* Metric Grid */}
+                      <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))',
+                        gap: '0.6rem',
+                        marginBottom: '0.75rem'
+                      }}>
+                        {/* Available Limit */}
+                        <div className="supadata-stat-box" style={{ borderLeft: '3px solid #10b981' }}>
+                          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>
+                            {t.form.supadataAvailable}
+                          </span>
+                          <span style={{ fontSize: '1.25rem', fontWeight: 700, color: '#10b981', lineHeight: 1.1 }}>
+                            {supadataUsage.total_remaining}
+                          </span>
+                          <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                            {Math.round(100 - supadataUsage.usage_percent)}% left
+                          </span>
+                        </div>
+
+                        {/* Used */}
+                        <div className="supadata-stat-box">
+                          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>
+                            {t.form.supadataUsed}
+                          </span>
+                          <span style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.1 }}>
+                            {supadataUsage.total_used}
+                          </span>
+                          <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                            {supadataUsage.usage_percent}% consumed
+                          </span>
+                        </div>
+
+                        {/* Total Limit */}
+                        <div className="supadata-stat-box">
+                          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>
+                            {t.form.supadataTotalLimit}
+                          </span>
+                          <span style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-secondary)', lineHeight: 1.1 }}>
+                            {supadataUsage.total_limit}
+                          </span>
+                          <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                            100 / key
+                          </span>
+                        </div>
+
+                        {/* Keys Configured */}
+                        <div className="supadata-stat-box">
+                          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>
+                            {t.form.supadataKeysCount}
+                          </span>
+                          <span style={{ fontSize: '1.25rem', fontWeight: 700, color: 'var(--text-primary)', lineHeight: 1.1 }}>
+                            {supadataUsage.total_keys}
+                          </span>
+                          <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)' }}>
+                            <span style={{ color: '#10b981', fontWeight: 600 }}>{supadataUsage.active_keys} {t.form.supadataActiveKeys}</span> · <span style={{ color: supadataUsage.exhausted_keys > 0 ? '#f59e0b' : 'var(--text-muted)' }}>{supadataUsage.exhausted_keys} {t.form.supadataExhaustedKeys}</span>
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Quota Progress Bar */}
+                      <div style={{ marginBottom: '0.4rem' }}>
+                        <div style={{
+                          height: '6px',
+                          width: '100%',
+                          background: 'rgba(255, 255, 255, 0.08)',
+                          borderRadius: '3px',
+                          overflow: 'hidden',
+                          position: 'relative'
+                        }}>
+                          <div
+                            style={{
+                              height: '100%',
+                              width: `${Math.min(100, Math.max(0, supadataUsage.usage_percent))}%`,
+                              background: supadataUsage.usage_percent >= 90
+                                ? 'linear-gradient(90deg, #f59e0b, #ef4444)'
+                                : supadataUsage.usage_percent >= 70
+                                  ? 'linear-gradient(90deg, #10b981, #f59e0b)'
+                                  : 'linear-gradient(90deg, #10b981, #06b6d4)',
+                              borderRadius: '3px',
+                              transition: 'width 0.6s cubic-bezier(0.4, 0, 0.2, 1)'
+                            }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Key Breakdown Details List */}
+                      {showKeyDetails && supadataUsage.keys_detail && supadataUsage.keys_detail.length > 0 && (
+                        <div style={{
+                          marginTop: '0.75rem',
+                          paddingTop: '0.75rem',
+                          borderTop: '1px solid rgba(255, 255, 255, 0.06)',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '0.4rem'
+                        }}>
+                          <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '0.2rem' }}>
+                            {t.form.supadataKeysCount} ({supadataUsage.total_keys}):
+                          </div>
+                          <div style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                            gap: '0.4rem',
+                            maxHeight: '180px',
+                            overflowY: 'auto'
+                          }}>
+                            {supadataUsage.keys_detail.map((k) => (
+                              <div
+                                key={k.index}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  padding: '0.35rem 0.6rem',
+                                  background: 'rgba(255, 255, 255, 0.02)',
+                                  borderRadius: '6px',
+                                  fontSize: '0.75rem',
+                                  border: '1px solid rgba(255, 255, 255, 0.04)'
+                                }}
+                              >
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                                  <span style={{ color: 'var(--text-muted)', fontSize: '0.7rem' }}>#{k.index}</span>
+                                  <code style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>{k.masked_key}</code>
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                  <span style={{
+                                    fontSize: '0.7rem',
+                                    color: k.remaining_credits > 0 ? '#10b981' : 'var(--text-muted)',
+                                    fontWeight: 500
+                                  }}>
+                                    {k.used_credits}/{k.max_credits}
+                                  </span>
+                                  <span style={{
+                                    fontSize: '0.65rem',
+                                    padding: '0.1rem 0.35rem',
+                                    borderRadius: '4px',
+                                    fontWeight: 600,
+                                    background: k.status === 'active' ? 'rgba(16, 185, 129, 0.15)' : k.status === 'exhausted' ? 'rgba(239, 68, 68, 0.12)' : 'rgba(245, 158, 11, 0.12)',
+                                    color: k.status === 'active' ? '#10b981' : k.status === 'exhausted' ? '#ef4444' : '#f59e0b'
+                                  }}>
+                                    {k.status === 'active' ? `${k.remaining_credits} left` : k.status === 'exhausted' ? t.form.supadataExhaustedBadge : t.form.supadataErrorBadge}
+                                  </span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                      No Supadata API keys detected in environment.
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </div>
 

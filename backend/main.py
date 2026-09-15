@@ -23,6 +23,8 @@ import re
 import logging
 import asyncio
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse, RedirectResponse, FileResponse
@@ -428,6 +430,9 @@ def fetch_transcript_supadata(video_id: str) -> List[dict]:
                             result.append({"text": text, "start": start, "duration": dur})
                     if result:
                         logger.info(f"Successfully retrieved {len(result)} transcript lines via Supadata ({masked_key})")
+                        # Invalidate usage cache so next check fetches fresh quota data
+                        global _supadata_usage_cache
+                        _supadata_usage_cache["timestamp"] = 0
                         return result
             elif response.status_code in (429, 402, 403, 401):
                 logger.warning(f"Supadata key {masked_key} returned status {response.status_code} (quota/limit). Rotating to next key...")
@@ -439,6 +444,121 @@ def fetch_transcript_supadata(video_id: str) -> List[dict]:
             continue
 
     return []
+
+
+_supadata_usage_cache = {
+    "data": None,
+    "timestamp": 0
+}
+_CACHE_TTL_SECONDS = 30
+
+def check_single_supadata_key(key: str, index: int) -> dict:
+    masked = f"{key[:7]}...{key[-4:]}" if len(key) >= 11 else "***"
+    import requests
+    try:
+        resp = requests.get(
+            "https://api.supadata.ai/v1/me",
+            headers={"x-api-key": key},
+            timeout=5
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            max_credits = int(data.get("maxCredits", 100))
+            used_credits = int(data.get("usedCredits", 0))
+            remaining = max(0, max_credits - used_credits)
+            status = "exhausted" if remaining == 0 else "active"
+            return {
+                "index": index,
+                "masked_key": masked,
+                "status": status,
+                "max_credits": max_credits,
+                "used_credits": used_credits,
+                "remaining_credits": remaining,
+                "plan": data.get("plan", "Free (100/mo)")
+            }
+        elif resp.status_code in (429, 402):
+            return {
+                "index": index,
+                "masked_key": masked,
+                "status": "exhausted",
+                "max_credits": 100,
+                "used_credits": 100,
+                "remaining_credits": 0,
+                "plan": "Limit Exceeded"
+            }
+        else:
+            return {
+                "index": index,
+                "masked_key": masked,
+                "status": "error",
+                "max_credits": 100,
+                "used_credits": 0,
+                "remaining_credits": 100,
+                "plan": f"HTTP {resp.status_code}"
+            }
+    except Exception as e:
+        logger.warning(f"Error checking Supadata key {masked}: {e}")
+        return {
+            "index": index,
+            "masked_key": masked,
+            "status": "error",
+            "max_credits": 100,
+            "used_credits": 0,
+            "remaining_credits": 100,
+            "plan": "Timeout/Error"
+        }
+
+def get_supadata_usage_data(force: bool = False) -> dict:
+    """Aggregates quota metrics across all configured Supadata API keys in parallel with 30s cache."""
+    global _supadata_usage_cache
+    now = time.time()
+    if not force and _supadata_usage_cache["data"] and (now - _supadata_usage_cache["timestamp"] < _CACHE_TTL_SECONDS):
+        cached_res = dict(_supadata_usage_cache["data"])
+        cached_res["cached"] = True
+        return cached_res
+
+    keys = get_supadata_keys()
+    if not keys:
+        empty_res = {
+            "total_keys": 0,
+            "total_limit": 0,
+            "total_used": 0,
+            "total_remaining": 0,
+            "usage_percent": 0.0,
+            "active_keys": 0,
+            "exhausted_keys": 0,
+            "keys_detail": [],
+            "cached": False,
+            "timestamp": now
+        }
+        _supadata_usage_cache = {"data": empty_res, "timestamp": now}
+        return empty_res
+
+    with ThreadPoolExecutor(max_workers=min(len(keys), 12)) as executor:
+        futures = [executor.submit(check_single_supadata_key, k, i + 1) for i, k in enumerate(keys)]
+        details = [f.result() for f in futures]
+
+    total_limit = sum(k["max_credits"] for k in details)
+    total_used = sum(k["used_credits"] for k in details)
+    total_remaining = sum(k["remaining_credits"] for k in details)
+    active_count = sum(1 for k in details if k["remaining_credits"] > 0)
+    exhausted_count = sum(1 for k in details if k["remaining_credits"] == 0 and k["status"] != "error")
+    usage_percent = round((total_used / total_limit * 100.0), 1) if total_limit > 0 else 0.0
+
+    res = {
+        "total_keys": len(keys),
+        "total_limit": total_limit,
+        "total_used": total_used,
+        "total_remaining": total_remaining,
+        "usage_percent": usage_percent,
+        "active_keys": active_count,
+        "exhausted_keys": exhausted_count,
+        "keys_detail": details,
+        "cached": False,
+        "timestamp": now
+    }
+    _supadata_usage_cache = {"data": res, "timestamp": now}
+    return res
 
 
 def fetch_transcript_ytdlp(video_id: str, proxy: Optional[str] = None) -> List[dict]:
@@ -692,6 +812,11 @@ def health_check():
         "proxy_configured": bool(proxy),
         "gemini_env_configured": has_gemini
     }
+
+@app.get("/api/supadata-usage")
+def get_supadata_usage_endpoint(refresh: bool = False):
+    """Retrieves dynamic usage and credit limits for all Supadata API keys."""
+    return get_supadata_usage_data(force=refresh)
 
 @app.get("/api/video-title")
 def get_video_title_endpoint(video_id: str):

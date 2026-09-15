@@ -46,6 +46,26 @@ export const en = {
     vercelSubtitlesTipDesc: "Serverless providers can get blocked when fetching auto-generated YouTube transcripts. If auto-fetch fails, download the subtitles manually using",
     andUploadOption: "and upload them using the Upload Custom Subtitles option.",
 
+    // Supadata API Usage
+    supadataTitle: "Supadata Cloud API Limit",
+    supadataAvailable: "Available Limit",
+    supadataUsed: "Used",
+    supadataTotalLimit: "Total Limit",
+    supadataKeysCount: "Keys Connected",
+    supadataActiveKeys: "Ready",
+    supadataExhaustedKeys: "Depleted",
+    supadataRefresh: "Refresh Usage",
+    supadataRefreshing: "Checking...",
+    supadataShowDetails: "Show Key Breakdown",
+    supadataHideDetails: "Hide Key Breakdown",
+    supadataStatusNormal: "Operational",
+    supadataStatusLow: "Quota Low",
+    supadataStatusDepleted: "All Keys Depleted",
+    supadataKey: "Key",
+    supadataExhaustedBadge: "Exhausted",
+    supadataActiveBadge: "Active",
+    supadataErrorBadge: "Error",
+
     // Analysis Range
     analysisRange: "Analysis Range",
     entireVideo: "Entire Video",

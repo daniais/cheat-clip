@@ -48,6 +48,26 @@ export const id: Translations = {
     vercelSubtitlesTipDesc: "Penyedia serverless terkadang dibatasi saat mengambil transkrip otomatis YouTube. Jika pengambilan otomatis gagal, unduh subtitle secara manual melalui",
     andUploadOption: "dan unggah menggunakan opsi Unggah Subtitle Manual di atas.",
 
+    // Supadata API Usage
+    supadataTitle: "Batas Penggunaan API Supadata",
+    supadataAvailable: "Sisa Limit Tersedia",
+    supadataUsed: "Terpakai",
+    supadataTotalLimit: "Total Limit",
+    supadataKeysCount: "Kunci Terhubung",
+    supadataActiveKeys: "Siap Pakai",
+    supadataExhaustedKeys: "Habis",
+    supadataRefresh: "Segarkan Kuota",
+    supadataRefreshing: "Memeriksa...",
+    supadataShowDetails: "Lihat Rincian Kunci",
+    supadataHideDetails: "Tutup Rincian Kunci",
+    supadataStatusNormal: "Operasional",
+    supadataStatusLow: "Sisa Kuota Menipis",
+    supadataStatusDepleted: "Semua Kunci Habis",
+    supadataKey: "Kunci",
+    supadataExhaustedBadge: "Habis",
+    supadataActiveBadge: "Aktif",
+    supadataErrorBadge: "Kendala",
+
     // Analysis Range
     analysisRange: "Rentang Analisis",
     entireVideo: "Seluruh Video",
