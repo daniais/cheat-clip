@@ -7,7 +7,7 @@ export const id: Translations = {
   },
   form: {
     urlLabel: "URL Video YouTube",
-    urlPlaceholder: "Tempel tautan video di sini (misal: https://www.youtube.com/watch?v=... atau shorts, youtu.be)",
+    urlPlaceholder: "Tempel tautan video di sini (misal: watch, live, shorts, youtu.be)",
     hackClips: "Cari Klip",
     processing: "Memproses...",
 

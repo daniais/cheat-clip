@@ -691,8 +691,8 @@ export default function App() {
 
   const extractVideoId = (urlStr: string): string | null => {
     const patterns = [
-      /(?:v=|\/v\/|embed\/|shorts\/|youtu\.be\/|\/embed\/|\/watch\?v=|\/watch\?.+&v=)([^#\&\?]{11})/,
-      /^(?:https?:\/\/)?(?:www\.)?(?:youtube\.com|youtu\.be)\/(?:watch\?v=)?([^#\&\?]{11})/
+      /(?:v=|\/v\/|embed\/|shorts\/|live\/|youtu\.be\/|\/embed\/|\/watch\?v=|\/watch\?.+&v=)([\w-]{11})/,
+      /^(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com|youtu\.be)\/(?:watch\?v=)?([\w-]{11})/
     ];
     for (const pattern of patterns) {
       const match = urlStr.match(pattern);
@@ -701,7 +701,7 @@ export default function App() {
       }
     }
     const trimmed = urlStr.trim();
-    if (trimmed.length === 11) {
+    if (trimmed.length === 11 && /^[\w-]{11}$/.test(trimmed)) {
       return trimmed;
     }
     return null;

@@ -54,26 +54,26 @@ app.add_middleware(
 # ----------------------------------------------------------------
 
 class ViralClip(BaseModel):
-    title: str = Field(description="Catchy clip title, max 8 words")
+    title: str = Field(description="Catchy clip title (max 8 words). MANDATORY: Never use first-person pronouns ('I', 'me', 'my', 'mine', 'saya', 'aku', 'gue'). Frame objectively using speaker name, host, role, or video context.")
     start_time: float = Field(description="Clip start in seconds, aligned to a sentence boundary")
     end_time: float = Field(description="Clip end in seconds, aligned to a sentence boundary")
     hook_time: float = Field(description="Absolute timestamp in seconds from video start where the potential hook occurs inside this clip range (must be >= start_time and <= end_time)")
     virality_score: int = Field(description="Virality score 1-100")
     key_quotes: List[str] = Field(description="1-2 key quotes from the clip")
     transcript: str = Field(description="Spoken text of the clip")
-    title_suggestion: str = Field(default="", description="Catchy alternative title suggestion")
-    caption_suggestion: str = Field(default="", description="Engaging social media caption suggestion")
+    title_suggestion: str = Field(default="", description="Catchy alternative title suggestion in third-person (no 'I'/'me'/'my'/'saya', frame around speaker or topic)")
+    caption_suggestion: str = Field(default="", description="Engaging social media caption suggestion framed around what the speaker discusses")
     hashtag_suggestion: str = Field(default="", description="Relevant hashtags suggestion (e.g. #hashtag1 #hashtag2)")
 
 class ViralClipGemini(BaseModel):
-    title: str = Field(description="Catchy clip title, max 8 words")
+    title: str = Field(description="Catchy clip title (max 8 words). MANDATORY: Never use first-person pronouns ('I', 'me', 'my', 'mine', 'saya', 'aku', 'gue'). Frame objectively using speaker name, host, role, or video context.")
     start_time: float = Field(description="Clip start in seconds, aligned to a sentence boundary")
     end_time: float = Field(description="Clip end in seconds, aligned to a sentence boundary")
     hook_time: float = Field(description="Absolute timestamp in seconds from video start where the potential hook occurs inside this clip range (must be >= start_time and <= end_time)")
     virality_score: int = Field(description="Virality score 1-100")
     key_quotes: List[str] = Field(description="1-2 key quotes from the clip")
-    title_suggestion: str = Field(default="", description="Catchy alternative title suggestion")
-    caption_suggestion: str = Field(default="", description="Engaging social media caption suggestion")
+    title_suggestion: str = Field(default="", description="Catchy alternative title suggestion in third-person (no 'I'/'me'/'my'/'saya', frame around speaker or topic)")
+    caption_suggestion: str = Field(default="", description="Engaging social media caption suggestion framed around what the speaker discusses")
     hashtag_suggestion: str = Field(default="", description="Relevant hashtags suggestion (e.g. #hashtag1 #hashtag2)")
 
 class VideoAnalysis(BaseModel):
@@ -252,18 +252,19 @@ def parse_manual_subtitles(content: str, default_duration: float = 0.0) -> List[
 
 def extract_video_id(url: str) -> Optional[str]:
     """Extracts the 11-character YouTube video ID from various URL formats."""
-    # Handle shorts, embed, watch?v=, youtu.be, etc.
+    # Handle shorts, live, embed, watch?v=, youtu.be, etc.
     patterns = [
-        r"(?:v=|\/v\/|embed\/|shorts\/|youtu\.be\/|\/embed\/|\/watch\?v=|\/watch\?.+&v=)([^#\&\?]{11})",
-        r"^(?:https?:\/\/)?(?:www\.)?(?:youtube\.com|youtu\.be)\/(?:watch\?v=)?([^#\&\?]{11})"
+        r"(?:v=|\/v\/|embed\/|shorts\/|live\/|youtu\.be\/|\/embed\/|\/watch\?v=|\/watch\?.+&v=)([\w-]{11})",
+        r"^(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com|youtu\.be)\/(?:watch\?v=)?([\w-]{11})"
     ]
     for pattern in patterns:
         match = re.search(pattern, url)
         if match:
             return match.group(1)
     # Simple length check fallback if the user just pasted the ID
-    if len(url.strip()) == 11:
-        return url.strip()
+    trimmed = url.strip()
+    if len(trimmed) == 11 and re.match(r"^[\w-]{11}$", trimmed):
+        return trimmed
     return None
 
 def get_proxy_url() -> Optional[str]:
@@ -335,6 +336,7 @@ def fetch_video_metadata(url: str, custom_proxy: Optional[str] = None):
     is_vercel = bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
     proxy = custom_proxy or get_proxy_url()
     video_id = extract_video_id(url)
+    target_url = f"https://www.youtube.com/watch?v={video_id}" if video_id else url
     
     # On Vercel, YouTube blocks direct datacenter IPs, so try proxy first if configured; locally try direct first
     attempts = [proxy, None] if (is_vercel and proxy) else [None, proxy] if proxy else [None]
@@ -351,7 +353,7 @@ def fetch_video_metadata(url: str, custom_proxy: Optional[str] = None):
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+                info = ydl.extract_info(target_url, download=False)
                 if not info:
                     raise Exception("yt-dlp returned empty info dict")
                 title = info.get('title')
@@ -1286,16 +1288,24 @@ async def analyze_video(request: AnalyzeRequest):
             focus_instruction = f"CRITICAL FOCUS: The user specifically wants you to find clips matching the following query/theme: \"{request.custom_prompt.strip()}\". Prioritize and tailor your selection of viral clips to fit this request, while still ensuring they make good standalone clips.\n\n"
 
         prompt = (
-            f"You are a viral video clip finder.\n"
-            f"Find {clip_range} short-form clip candidates from this YouTube transcript for TikTok/Reels/Shorts.\n\n"
-            f"Title: {title}\n"
+            f"You are an expert viral video clip finder for TikTok, YouTube Shorts, and Instagram Reels.\n"
+            f"Find {clip_range} high-performing short-form clip candidates from this YouTube transcript.\n\n"
+            f"Source Video Title: {title}\n"
             f"Duration Range: {int(start_bound)}s to {int(end_bound)}s (Length: {int(duration)}s) | Target clip length: {dur_range}\n"
             f"{heatmap_note}\n"
             f"{focus_instruction}"
-            f"Match output language to transcript language.\n\n"
+            f"Match output language to the primary language of the transcript.\n\n"
             f"Transcript (start|end[|interest] text):\n---\n{transcript_text}\n---\n\n"
-            f"Rules: use exact seconds from transcript; clips must start/end at sentence boundaries; do not overlap.\n"
-            f"Return {clip_range} clips sorted by virality_score desc."
+            f"CRITICAL RULES & PERSPECTIVE GUIDELINES (MANDATORY):\n"
+            f"1. Timestamps: Use exact seconds from the transcript; clips must start and end at natural sentence boundaries; clips must not overlap.\n"
+            f"2. Objective Third-Person Perspective (STRICT - NO FIRST-PERSON IN TITLES):\n"
+            f"   - NEVER generate titles or title_suggestions using first-person pronouns such as 'I', 'me', 'my', 'mine', 'myself' (or Indonesian: 'saya', 'aku', 'gue', 'ku').\n"
+            f"   - Clip titles must NOT sound like the clipper's or user's personal opinion (e.g. NEVER write 'Why I Quit', 'My Biggest Mistake', 'Kenapa Saya Keluar', 'Opini Saya').\n"
+            f"   - ALWAYS frame titles objectively using the context of the video: refer to the person speaking by their name (from the video title or transcript), their role (e.g. 'The Host', 'The Guest', 'The Founder', 'The CEO'), or describe the topic/story objectively (e.g. 'Why [Speaker Name] Quit', 'How [Name] Scaled A Startup', 'The Shocking Truth About [Topic]').\n"
+            f"   - If the speaker's name is not explicitly mentioned, use contextual descriptors like 'The Host', 'The Guest', 'The Expert', or direct topic phrasing.\n"
+            f"3. Titles & Hook: Maximum 8 words, punchy, curiosity-inducing, and optimized for high click-through and viewer retention.\n"
+            f"4. Captions & Hashtags: Make caption_suggestion engaging and framed around what the speaker discusses or reveals, and provide 3-5 relevant hashtags in hashtag_suggestion.\n"
+            f"5. Quality & Ranking: Return {clip_range} clips sorted by virality_score descending."
         )
 
         requested_model = (request.model or 'gemini-2.5-flash').strip()

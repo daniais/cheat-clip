@@ -5,7 +5,7 @@ export const en = {
   },
   form: {
     urlLabel: "YouTube Video URL",
-    urlPlaceholder: "Paste video link here (e.g. https://www.youtube.com/watch?v=... or shorts, youtu.be)",
+    urlPlaceholder: "Paste video link here (e.g. watch, live, shorts, youtu.be)",
     hackClips: "Hack Clips",
     processing: "Processing...",
     
