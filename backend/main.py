@@ -32,8 +32,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import yt_dlp
 import requests
+import subprocess
+import html
 from urllib.parse import urlsplit
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.formatters import JSONFormatter
 from google import genai
 from google.genai import types
 # Setup logging
@@ -359,6 +362,136 @@ def get_youtube_transcript_proxy_config(custom_proxy: Optional[str] = None):
     except Exception as e:
         logger.warning(f"Failed creating GenericProxyConfig: {e}")
         return None
+
+# ── Shared Cookie Jar & HTTP Session Factory ──────────────────────────────────
+# Per https://github.com/jdepoix/youtube-transcript-api#overwriting-request-defaults
+# Caching cookies across requests (consent screens, visitor tokens) and setting
+# realistic browser headers minimizes automated bot blocks on YouTube.
+_shared_cookie_jar = requests.cookies.RequestsCookieJar()
+
+def create_http_client(timeout: float = 15.0) -> TimeoutSession:
+    """Creates a requests.Session pre-configured with realistic browser headers,
+    shared YouTube cookies (consent/tokens), and optional CA bundle per documentation:
+    https://github.com/jdepoix/youtube-transcript-api#overwriting-request-defaults
+    """
+    session = TimeoutSession(timeout=timeout)
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9,id;q=0.8",
+        "Accept-Encoding": "gzip, deflate",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Upgrade-Insecure-Requests": "1"
+    })
+    # Inherit verified session cookies across requests
+    session.cookies.update(_shared_cookie_jar)
+
+    # SSL verification certificate override if defined
+    ca_bundle = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("SSL_CERT_FILE")
+    if ca_bundle and os.path.exists(ca_bundle):
+        session.verify = ca_bundle
+
+    return session
+
+def normalize_transcript(fetched_data) -> List[dict]:
+    """Normalizes FetchedTranscript objects (using JSONFormatter or to_raw_data()),
+    raw JSON strings, or dict lists into standard timestamped segment dictionaries.
+    Per https://github.com/jdepoix/youtube-transcript-api#using-formatters
+    """
+    if not fetched_data:
+        return []
+
+    items = []
+    if hasattr(fetched_data, "snippets") or hasattr(fetched_data, "to_raw_data"):
+        try:
+            formatter = JSONFormatter()
+            json_str = formatter.format_transcript(fetched_data)
+            items = json.loads(json_str)
+        except Exception:
+            items = fetched_data.to_raw_data() if hasattr(fetched_data, "to_raw_data") else list(fetched_data)
+    elif isinstance(fetched_data, str):
+        try:
+            parsed = json.loads(fetched_data)
+            items = parsed[0] if isinstance(parsed, list) and len(parsed) > 0 and isinstance(parsed[0], list) else parsed
+        except Exception:
+            return []
+    elif isinstance(fetched_data, list):
+        items = fetched_data
+    else:
+        try:
+            items = list(fetched_data)
+        except Exception:
+            return []
+
+    results = []
+    for item in items:
+        if isinstance(item, dict):
+            text = html.unescape(str(item.get("text", ""))).strip()
+            start = float(item.get("start", 0.0))
+            dur = float(item.get("duration", 0.0))
+        else:
+            text = html.unescape(getattr(item, "text", "")).strip()
+            start = float(getattr(item, "start", 0.0))
+            dur = float(getattr(item, "duration", 0.0))
+
+        if text:
+            results.append({
+                "text": text,
+                "start": round(start, 2),
+                "duration": max(0.1, round(dur, 2))
+            })
+
+    return results
+
+def fetch_transcript_cli(
+    video_id: str,
+    priority_langs: List[str],
+    proxy_url: Optional[str] = None,
+    custom_proxy: Optional[str] = None,
+    timeout: int = 20
+) -> List[dict]:
+    """Attempts subtitle extraction using youtube_transcript_api CLI subprocess.
+    Provides an isolated process environment with independent network & proxy stack.
+    Handles hyphenated video IDs (e.g. \"\\-abc\") per documentation:
+    https://github.com/jdepoix/youtube-transcript-api#cli
+    """
+    escaped_id = f"\\{video_id}" if video_id.startswith("-") else video_id
+    cmd = [sys.executable, "-m", "youtube_transcript_api", escaped_id, "--format", "json"]
+
+    if priority_langs:
+        cmd.extend(["--languages"] + priority_langs)
+
+    ws_user = os.environ.get("WEBSHARE_USERNAME", "").strip()
+    ws_pass = os.environ.get("WEBSHARE_PASSWORD", "").strip()
+    effective_proxy = custom_proxy or proxy_url or get_proxy_url()
+
+    if ws_user and ws_pass and not custom_proxy:
+        cmd.extend(["--webshare-proxy-username", ws_user, "--webshare-proxy-password", ws_pass])
+    elif effective_proxy:
+        cmd.extend(["--http-proxy", effective_proxy, "--https-proxy", effective_proxy])
+
+    logger.info(f"Executing CLI transcript extraction for {video_id}...")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if proc.returncode == 0 and proc.stdout.strip():
+            raw = json.loads(proc.stdout)
+            items = raw[0] if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], list) else raw
+            result = normalize_transcript(items)
+            if result:
+                logger.info(f"Transcript fetched via CLI fallback: {len(result)} lines")
+                return result
+        stderr_snippet = (proc.stderr or proc.stdout or "").strip()
+        first_err_line = stderr_snippet.split("\n")[0] if stderr_snippet else f"exit code {proc.returncode}"
+        raise Exception(f"CLI returned {proc.returncode}: {first_err_line}")
+    except Exception as e:
+        logger.warning(f"CLI transcript extraction failed: {e}")
+        raise
+
 
 
 def get_youtube_oembed_title(video_id_or_url: str) -> Optional[str]:
@@ -725,104 +858,137 @@ def fetch_transcript_ytdlp(video_id: str, proxy: Optional[str] = None) -> List[d
 
 
 def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[dict]:
-    """Retrieves subtitles.
-    Fallback order:
-      1. Supadata API (if keys configured) — ideal for cloud/serverless/VPS environments to bypass YouTube datacenter IP blocks.
-      2. Proxy Fallback (YouTubeTranscriptApi with WebshareProxyConfig/GenericProxyConfig + yt-dlp via proxy)
-         per https://github.com/jdepoix/youtube-transcript-api#working-around-ip-bans-requestblocked-or-ipblocked-exception
-      3. Direct fetch fallback (direct YouTubeTranscriptApi + direct yt-dlp) for localhost/residential IPs.
-    If all strategies fail, raises a clear, detailed HTTPException showing exact errors from every method attempted.
+    """Retrieves subtitles using a comprehensive multi-tier fallback pipeline:
+      Tier 1: Supadata API (if keys configured) — cloud residential rotation
+      Tier 2: YouTubeTranscriptApi Python API (Proxy + Shared Session + Browser Headers + Translation fallback)
+      Tier 3: YouTubeTranscriptApi CLI Subprocess (Proxy)
+      Tier 4: yt-dlp Native Extraction (Proxy)
+      Tier 5: Direct YouTubeTranscriptApi Python API (Direct, Shared Session + Browser Headers)
+      Tier 6: Direct YouTubeTranscriptApi CLI Subprocess (Direct)
+      Tier 7: Direct yt-dlp Native Extraction (Direct)
+    If all tiers fail, raises detailed HTTPException with full diagnostics and solutions.
     """
-
-    def to_dict_list(fetched) -> List[dict]:
-        return [
-            {
-                "text": getattr(line, "text", ""),
-                "start": getattr(line, "start", 0.0),
-                "duration": getattr(line, "duration", 0.0)
-            }
-            for line in fetched
-        ]
-
     priority_langs = ['id', 'en', 'es', 'pt', 'fr', 'de', 'ja', 'ko', 'zh-Hans', 'zh-Hant', 'ar', 'hi', 'ru']
     keys = get_supadata_keys()
     proxy_url = custom_proxy or get_proxy_url()
     proxy_cfg = get_youtube_transcript_proxy_config(custom_proxy)
     attempt_history: List[str] = []
 
-    # ── Strategy 1: Supadata API (if keys configured) ─────────────────────────
+    # ── Tier 1: Supadata API (if keys configured) ─────────────────────────────
     if keys:
-        logger.info(f"Attempting transcript retrieval via Supadata API ({len(keys)} keys configured)...")
+        logger.info(f"[Tier 1] Attempting transcript retrieval via Supadata API ({len(keys)} keys configured)...")
         supadata_data = fetch_transcript_supadata(video_id, error_collector=attempt_history)
         if supadata_data:
-            return supadata_data
-        logger.info("Supadata API attempt unsuccessful — proceeding to proxy fallback...")
+            return normalize_transcript(supadata_data)
+        logger.info("[Tier 1] Supadata API unsuccessful — proceeding to proxy fallback tiers...")
     else:
-        attempt_history.append("Supadata API: Not configured (no keys in SUPADATA_API_KEYS)")
+        attempt_history.append("Tier 1 (Supadata API): Not configured (no keys in SUPADATA_API_KEYS)")
 
-    # ── Strategy 2: Proxy Fallback (Webshare or Generic Proxy) ────────────────
+    # ── Proxy Tiers (Tier 2 - 4) ──────────────────────────────────────────────
     if proxy_cfg or proxy_url:
         masked_proxy = proxy_url.split('@')[-1] if (proxy_url and '@' in proxy_url) else (proxy_url or "Configured Proxy")
-        logger.info(f"Attempting subtitle retrieval via proxy fallback ({masked_proxy})...")
+        logger.info(f"[Tier 2-4] Attempting proxy fallback pipeline ({masked_proxy})...")
 
-        # 2a. YouTubeTranscriptApi routed through ProxyConfig with TimeoutSession
+        # ── Tier 2: YouTubeTranscriptApi Python API with Proxy & Shared Session ───
         try:
-            session = TimeoutSession(timeout=15.0)
-            proxy_api = YouTubeTranscriptApi(proxy_config=proxy_cfg, http_client=session)
-            
-            # Fast direct fetch with priority languages
-            try:
-                data = to_dict_list(proxy_api.fetch(video_id, languages=priority_langs))
-                if data:
-                    logger.info(f"Transcript fetched via proxy fallback (YouTubeTranscriptApi direct): {len(data)} lines")
-                    return data
-            except Exception as direct_err:
-                logger.info(f"Proxy YouTubeTranscriptApi direct language fetch missed: {direct_err}")
+            client = create_http_client(timeout=15.0)
+            proxy_api = YouTubeTranscriptApi(proxy_config=proxy_cfg, http_client=client)
 
-            # List and fetch all available transcripts (manual then auto)
+            # 2a. Direct language match
+            try:
+                data = proxy_api.fetch(video_id, languages=priority_langs)
+                res = normalize_transcript(data)
+                if res:
+                    _shared_cookie_jar.update(client.cookies)
+                    logger.info(f"[Tier 2a] Transcript fetched via proxy Python API direct: {len(res)} lines")
+                    return res
+            except Exception as direct_err:
+                logger.info(f"[Tier 2a] Proxy direct language fetch missed: {direct_err}")
+
+            # 2b. List all transcripts & try fetching manual, then auto
             try:
                 transcripts = list(proxy_api.list(video_id))
                 manual = [t for t in transcripts if not getattr(t, 'is_generated', False)]
                 generated = [t for t in transcripts if getattr(t, 'is_generated', False)]
                 for t in (manual + generated):
                     try:
-                        data = to_dict_list(t.fetch())
-                        if data:
-                            logger.info(f"Transcript fetched via proxy fallback (YouTubeTranscriptApi list {t.language}): {len(data)} lines")
-                            return data
+                        data = t.fetch()
+                        res = normalize_transcript(data)
+                        if res:
+                            _shared_cookie_jar.update(client.cookies)
+                            logger.info(f"[Tier 2b] Transcript fetched via proxy Python API list ({t.language}): {len(res)} lines")
+                            return res
                     except Exception:
                         continue
-                attempt_history.append(f"YouTubeTranscriptApi (proxy): No accessible transcript found in {len(transcripts)} available tracks")
+
+                # 2c. Translation fallback: translate any translatable track to 'id' or 'en'
+                for t in transcripts:
+                    if getattr(t, 'is_translatable', False):
+                        for target_lang in ['id', 'en']:
+                            try:
+                                translated = t.translate(target_lang)
+                                data = translated.fetch()
+                                res = normalize_transcript(data)
+                                if res:
+                                    _shared_cookie_jar.update(client.cookies)
+                                    logger.info(f"[Tier 2c] Transcript translated via proxy Python API ({t.language} -> {target_lang}): {len(res)} lines")
+                                    return res
+                            except Exception:
+                                continue
+
+                attempt_history.append(f"Tier 2 (Proxy Python API): No accessible track in {len(transcripts)} tracks")
             except Exception as list_err:
                 err_type = type(list_err).__name__
                 err_msg = str(list_err).strip().split('\n')[0]
-                attempt_history.append(f"YouTubeTranscriptApi (proxy): {err_type} ({err_msg})")
+                attempt_history.append(f"Tier 2 (Proxy Python API): {err_type} ({err_msg})")
         except Exception as init_err:
-            attempt_history.append(f"YouTubeTranscriptApi (proxy setup): {type(init_err).__name__} ({init_err})")
+            attempt_history.append(f"Tier 2 (Proxy Python API setup): {type(init_err).__name__} ({init_err})")
 
-        # 2b. yt-dlp native extraction routed through proxy
+        # ── Tier 3: YouTubeTranscriptApi CLI Subprocess with Proxy ───────────────
         try:
-            proxy_ytdlp_data = fetch_transcript_ytdlp(video_id, proxy=proxy_url)
-            if proxy_ytdlp_data:
-                logger.info(f"Transcript fetched via proxy fallback (yt-dlp): {len(proxy_ytdlp_data)} lines")
-                return proxy_ytdlp_data
-            else:
-                attempt_history.append("yt-dlp (proxy): No subtitle streams found or extraction returned empty")
+            cli_data = fetch_transcript_cli(
+                video_id,
+                priority_langs,
+                proxy_url=proxy_url,
+                custom_proxy=custom_proxy,
+                timeout=20
+            )
+            if cli_data:
+                logger.info(f"[Tier 3] Transcript fetched via proxy CLI subprocess: {len(cli_data)} lines")
+                return cli_data
+        except Exception as cli_err:
+            attempt_history.append(f"Tier 3 (Proxy CLI Subprocess): {type(cli_err).__name__} ({str(cli_err)[:150]})")
+
+        # ── Tier 4: yt-dlp Native Extraction with Proxy ──────────────────────────
+        try:
+            ytdlp_proxy_data = fetch_transcript_ytdlp(video_id, proxy=proxy_url)
+            if ytdlp_proxy_data:
+                res = normalize_transcript(ytdlp_proxy_data)
+                if res:
+                    logger.info(f"[Tier 4] Transcript fetched via proxy yt-dlp: {len(res)} lines")
+                    return res
+            attempt_history.append("Tier 4 (Proxy yt-dlp): No subtitle streams found or extraction empty")
         except Exception as ytdlp_err:
-            attempt_history.append(f"yt-dlp (proxy): {type(ytdlp_err).__name__} ({str(ytdlp_err)[:150]})")
-    else:
-        attempt_history.append("Proxy Fallback: No proxy configured (WEBSHARE_PROXY, WEBSHARE_USERNAME, or PROXY_URL is unset in .env)")
+            attempt_history.append(f"Tier 4 (Proxy yt-dlp): {type(ytdlp_err).__name__} ({str(ytdlp_err)[:150]})")
 
-    # ── Strategy 3: Direct Fetch Fallback (Localhost / Residential IP) ─────────
-    logger.info("Attempting direct YouTube transcript retrieval (no proxy)...")
+    else:
+        attempt_history.append("Tier 2-4 (Proxy Fallbacks): No proxy configured in .env (WEBSHARE_PROXY, WEBSHARE_USERNAME, or PROXY_URL)")
+
+    # ── Direct Tiers (Tier 5 - 7: Localhost / Residential IP fallback) ─────────
+    logger.info("[Tier 5-7] Attempting direct YouTube retrieval (no proxy)...")
+
+    # ── Tier 5: Direct YouTubeTranscriptApi Python API ────────────────────────
     try:
-        direct_session = TimeoutSession(timeout=10.0)
-        direct_api = YouTubeTranscriptApi(http_client=direct_session)
+        direct_client = create_http_client(timeout=10.0)
+        direct_api = YouTubeTranscriptApi(http_client=direct_client)
+
         try:
-            data = to_dict_list(direct_api.fetch(video_id, languages=priority_langs))
-            if data:
-                logger.info(f"Transcript fetched via direct YouTube fetch: {len(data)} lines")
-                return data
+            data = direct_api.fetch(video_id, languages=priority_langs)
+            res = normalize_transcript(data)
+            if res:
+                _shared_cookie_jar.update(direct_client.cookies)
+                logger.info(f"[Tier 5a] Transcript fetched via direct Python API: {len(res)} lines")
+                return res
         except Exception:
             pass
 
@@ -832,32 +998,60 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
             generated = [t for t in all_transcripts if getattr(t, 'is_generated', False)]
             for transcript in (manual + generated):
                 try:
-                    data = to_dict_list(transcript.fetch())
-                    if data:
-                        logger.info(f"Transcript fetched via direct list ({transcript.language}): {len(data)} lines")
-                        return data
+                    data = transcript.fetch()
+                    res = normalize_transcript(data)
+                    if res:
+                        _shared_cookie_jar.update(direct_client.cookies)
+                        logger.info(f"[Tier 5b] Transcript fetched via direct list ({transcript.language}): {len(res)} lines")
+                        return res
                 except Exception:
                     continue
-            attempt_history.append(f"Direct YouTube API: No accessible tracks in {len(all_transcripts)} tracks")
+
+            # Direct translation fallback
+            for t in all_transcripts:
+                if getattr(t, 'is_translatable', False):
+                    for target_lang in ['id', 'en']:
+                        try:
+                            translated = t.translate(target_lang)
+                            data = translated.fetch()
+                            res = normalize_transcript(data)
+                            if res:
+                                _shared_cookie_jar.update(direct_client.cookies)
+                                logger.info(f"[Tier 5c] Transcript translated via direct list ({t.language} -> {target_lang}): {len(res)} lines")
+                                return res
+                        except Exception:
+                            continue
+
+            attempt_history.append(f"Tier 5 (Direct Python API): No accessible track in {len(all_transcripts)} tracks")
         except Exception as list_err:
             err_type = type(list_err).__name__
             err_msg = str(list_err).strip().split('\n')[0]
-            attempt_history.append(f"Direct YouTube API: {err_type} ({err_msg})")
+            attempt_history.append(f"Tier 5 (Direct Python API): {err_type} ({err_msg})")
     except Exception as api_err:
-        attempt_history.append(f"Direct YouTube API: {type(api_err).__name__} ({str(api_err)[:150]})")
+        attempt_history.append(f"Tier 5 (Direct Python API setup): {type(api_err).__name__} ({str(api_err)[:150]})")
 
-    # 3b. Direct yt-dlp native extraction
+    # ── Tier 6: Direct YouTubeTranscriptApi CLI Subprocess ────────────────────
     try:
-        ytdlp_data = fetch_transcript_ytdlp(video_id, proxy=None)
-        if ytdlp_data:
-            logger.info(f"Transcript fetched via direct yt-dlp: {len(ytdlp_data)} lines")
-            return ytdlp_data
-        else:
-            attempt_history.append("Direct yt-dlp: No subtitle streams found")
-    except Exception as ytdlp_err:
-        attempt_history.append(f"Direct yt-dlp: {type(ytdlp_err).__name__} ({str(ytdlp_err)[:150]})")
+        direct_cli_data = fetch_transcript_cli(video_id, priority_langs, proxy_url=None, timeout=15)
+        if direct_cli_data:
+            logger.info(f"[Tier 6] Transcript fetched via direct CLI subprocess: {len(direct_cli_data)} lines")
+            return direct_cli_data
+    except Exception as cli_err:
+        attempt_history.append(f"Tier 6 (Direct CLI Subprocess): {type(cli_err).__name__} ({str(cli_err)[:150]})")
 
-    # ── All strategies exhausted: Construct Clear, Actionable Error ───────────
+    # ── Tier 7: Direct yt-dlp Native Extraction ──────────────────────────────
+    try:
+        direct_ytdlp_data = fetch_transcript_ytdlp(video_id, proxy=None)
+        if direct_ytdlp_data:
+            res = normalize_transcript(direct_ytdlp_data)
+            if res:
+                logger.info(f"[Tier 7] Transcript fetched via direct yt-dlp: {len(res)} lines")
+                return res
+        attempt_history.append("Tier 7 (Direct yt-dlp): No subtitle streams found")
+    except Exception as ytdlp_err:
+        attempt_history.append(f"Tier 7 (Direct yt-dlp): {type(ytdlp_err).__name__} ({str(ytdlp_err)[:150]})")
+
+    # ── All Tiers Exhausted: Construct Comprehensive Diagnostic Error ─────────
     combined_history = " ".join(attempt_history)
     root_cause = []
     if "TranscriptsDisabled" in combined_history:
@@ -889,7 +1083,7 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
     error_lines.append("  3. Upload custom subtitles manually (.srt or .txt file) using the 'Upload Custom Subtitle' setting above.")
 
     full_error_detail = "\n".join(error_lines)
-    logger.error(f"Subtitle retrieval exhausted all methods:\n{full_error_detail}")
+    logger.error(f"Subtitle retrieval exhausted all {len(attempt_history)} methods:\n{full_error_detail}")
     raise HTTPException(status_code=400, detail=full_error_detail)
 
 
