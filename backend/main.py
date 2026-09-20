@@ -25,7 +25,7 @@ import asyncio
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional
+from typing import List, Optional, Callable
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse, RedirectResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -857,7 +857,11 @@ def fetch_transcript_ytdlp(video_id: str, proxy: Optional[str] = None) -> List[d
     return []
 
 
-def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[dict]:
+def fetch_transcript(
+    video_id: str,
+    custom_proxy: Optional[str] = None,
+    on_progress: Optional[Callable[[str, str, int], None]] = None
+) -> List[dict]:
     """Retrieves subtitles using a comprehensive multi-tier fallback pipeline:
       Tier 1: Supadata API (if keys configured) — cloud residential rotation
       Tier 2: YouTubeTranscriptApi Python API (Proxy + Shared Session + Browser Headers + Translation fallback)
@@ -868,6 +872,13 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
       Tier 7: Direct yt-dlp Native Extraction (Direct)
     If all tiers fail, raises detailed HTTPException with full diagnostics and solutions.
     """
+    def notify(stage: str, detail: str, pct: int):
+        if on_progress:
+            try:
+                on_progress(stage, detail, pct)
+            except Exception:
+                pass
+
     priority_langs = ['id', 'en', 'es', 'pt', 'fr', 'de', 'ja', 'ko', 'zh-Hans', 'zh-Hant', 'ar', 'hi', 'ru']
     keys = get_supadata_keys()
     proxy_url = custom_proxy or get_proxy_url()
@@ -877,6 +888,7 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
     # ── Tier 1: Supadata API (if keys configured) ─────────────────────────────
     if keys:
         logger.info(f"[Tier 1] Attempting transcript retrieval via Supadata API ({len(keys)} keys configured)...")
+        notify("Tier 1/7: Supadata Cloud API", f"Trying Method 1/7: Supadata Cloud API ({len(keys)} keys rotation)...", 30)
         supadata_data = fetch_transcript_supadata(video_id, error_collector=attempt_history)
         if supadata_data:
             return normalize_transcript(supadata_data)
@@ -890,6 +902,7 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
         logger.info(f"[Tier 2-4] Attempting proxy fallback pipeline ({masked_proxy})...")
 
         # ── Tier 2: YouTubeTranscriptApi Python API with Proxy & Shared Session ───
+        notify("Tier 2/7: Proxy Python API", f"Trying Method 2/7: YouTubeTranscriptApi via rotating proxy ({masked_proxy})...", 45)
         try:
             client = create_http_client(timeout=15.0)
             proxy_api = YouTubeTranscriptApi(proxy_config=proxy_cfg, http_client=client)
@@ -926,6 +939,7 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
                     if getattr(t, 'is_translatable', False):
                         for target_lang in ['id', 'en']:
                             try:
+                                notify("Tier 2/7: Translating Captions", f"Translating available {t.language} track to {target_lang} via proxy...", 52)
                                 translated = t.translate(target_lang)
                                 data = translated.fetch()
                                 res = normalize_transcript(data)
@@ -945,6 +959,7 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
             attempt_history.append(f"Tier 2 (Proxy Python API setup): {type(init_err).__name__} ({init_err})")
 
         # ── Tier 3: YouTubeTranscriptApi CLI Subprocess with Proxy ───────────────
+        notify("Tier 3/7: Proxy CLI Subprocess", "Trying Method 3/7: Isolated CLI subprocess via proxy...", 60)
         try:
             cli_data = fetch_transcript_cli(
                 video_id,
@@ -960,6 +975,7 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
             attempt_history.append(f"Tier 3 (Proxy CLI Subprocess): {type(cli_err).__name__} ({str(cli_err)[:150]})")
 
         # ── Tier 4: yt-dlp Native Extraction with Proxy ──────────────────────────
+        notify("Tier 4/7: Proxy yt-dlp Native", "Trying Method 4/7: yt-dlp native caption extraction via proxy...", 70)
         try:
             ytdlp_proxy_data = fetch_transcript_ytdlp(video_id, proxy=proxy_url)
             if ytdlp_proxy_data:
@@ -978,6 +994,7 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
     logger.info("[Tier 5-7] Attempting direct YouTube retrieval (no proxy)...")
 
     # ── Tier 5: Direct YouTubeTranscriptApi Python API ────────────────────────
+    notify("Tier 5/7: Direct YouTube API", "Trying Method 5/7: Direct YouTubeTranscriptApi (localhost / residential)...", 80)
     try:
         direct_client = create_http_client(timeout=10.0)
         direct_api = YouTubeTranscriptApi(http_client=direct_client)
@@ -1012,6 +1029,7 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
                 if getattr(t, 'is_translatable', False):
                     for target_lang in ['id', 'en']:
                         try:
+                            notify("Tier 5/7: Translating Captions", f"Translating available {t.language} track to {target_lang} directly...", 84)
                             translated = t.translate(target_lang)
                             data = translated.fetch()
                             res = normalize_transcript(data)
@@ -1031,6 +1049,7 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
         attempt_history.append(f"Tier 5 (Direct Python API setup): {type(api_err).__name__} ({str(api_err)[:150]})")
 
     # ── Tier 6: Direct YouTubeTranscriptApi CLI Subprocess ────────────────────
+    notify("Tier 6/7: Direct CLI Subprocess", "Trying Method 6/7: Direct isolated CLI subprocess...", 88)
     try:
         direct_cli_data = fetch_transcript_cli(video_id, priority_langs, proxy_url=None, timeout=15)
         if direct_cli_data:
@@ -1040,6 +1059,7 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
         attempt_history.append(f"Tier 6 (Direct CLI Subprocess): {type(cli_err).__name__} ({str(cli_err)[:150]})")
 
     # ── Tier 7: Direct yt-dlp Native Extraction ──────────────────────────────
+    notify("Tier 7/7: Direct yt-dlp Native", "Trying Method 7/7: Direct yt-dlp native caption extraction...", 94)
     try:
         direct_ytdlp_data = fetch_transcript_ytdlp(video_id, proxy=None)
         if direct_ytdlp_data:
@@ -1135,18 +1155,30 @@ def _sse(data: dict) -> str:
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 @app.get("/api/health")
-def health_check():
+def health_check(refresh: bool = False):
     is_vercel = bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
     keys = get_supadata_keys()
     proxy = get_proxy_url()
     has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
+    supadata_info = get_supadata_usage_data(force=refresh) if keys else {
+        "total_keys": 0,
+        "total_limit": 0,
+        "total_used": 0,
+        "total_remaining": 0,
+        "usage_percent": 0.0,
+        "active_keys": 0,
+        "exhausted_keys": 0,
+        "keys_detail": [],
+        "status": "not_configured"
+    }
     return {
         "status": "ok",
         "message": "CHEAT CLIP API is active",
         "is_vercel": is_vercel,
-        "supadata_keys_count": len(keys),
         "proxy_configured": bool(proxy),
-        "gemini_env_configured": has_gemini
+        "gemini_env_configured": has_gemini,
+        "supadata_keys_count": len(keys),
+        "supadata": supadata_info
     }
 
 @app.get("/api/supadata-usage")
@@ -1409,16 +1441,45 @@ async def analyze_video(request: AnalyzeRequest):
                 yield _sse({"error": f"Failed to parse manual subtitles: {str(e)}", "status": 400})
                 return
         else:
+            loop = asyncio.get_running_loop()
+            progress_queue = asyncio.Queue()
+
+            def progress_callback(stage: str, detail: str, step_pct: int = 30):
+                loop.call_soon_threadsafe(progress_queue.put_nowait, {
+                    "step": 3,
+                    "step_progress": step_pct,
+                    "overall_progress": min(68, 50 + int(step_pct * 0.2)),
+                    "stage": stage,
+                    "detail": detail,
+                    "message": detail
+                })
+
+            # Initial stage event
             yield _sse({
                 "step": 3,
-                "step_progress": 30,
+                "step_progress": 25,
                 "overall_progress": 55,
                 "stage": "Fetching Subtitles",
-                "detail": "Querying YouTube caption tracks & auto-generated transcripts...",
-                "message": "Fetching subtitles — trying video's original language..."
+                "detail": "Initializing multi-tier subtitle extraction pipeline...",
+                "message": "Initializing multi-tier subtitle extraction pipeline..."
             })
+
             try:
-                transcript_lines = await asyncio.to_thread(fetch_transcript, video_id, request.proxy)
+                task = asyncio.create_task(
+                    asyncio.to_thread(fetch_transcript, video_id, request.proxy, progress_callback)
+                )
+
+                while not task.done():
+                    try:
+                        evt = await asyncio.wait_for(progress_queue.get(), timeout=0.2)
+                        yield _sse(evt)
+                    except asyncio.TimeoutError:
+                        pass
+
+                while not progress_queue.empty():
+                    yield _sse(progress_queue.get_nowait())
+
+                transcript_lines = await task
                 yield _sse({
                     "step": 3,
                     "step_progress": 100,
