@@ -108,6 +108,7 @@ export const id: Translations = {
     getNewKeyLink: "Dapatkan key gratis di Google AI Studio ↗",
     noSubtitlesMsg: "Tidak dapat mengambil subtitle untuk video ini. Subtitle mungkin dinonaktifkan, atau video dibatasi usia/bersifat privat.",
     noSubtitlesTip: "Penyedia hosting serverless terkadang diblokir saat mengambil transkrip YouTube otomatis. Untuk mengatasinya, unduh subtitle manual lewat downsub.com, unggah berkas melalui pengaturan Unggah Subtitle Manual di atas, lalu coba analisis kembali.",
+    tryAgain: "Coba Lagi",
   },
   loading: {
     decodingEngagement: "Membedah Retensi Video",

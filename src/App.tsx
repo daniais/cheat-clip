@@ -658,8 +658,8 @@ export default function App() {
     return null;
   };
 
-  const handleAnalyze = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleAnalyze = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (!url.trim()) return;
 
     // Require an API key before making any request
@@ -2085,54 +2085,102 @@ Transcript:
               <div style={{ fontSize: '0.875rem', color: '#fca5a5', marginTop: '0.5rem', lineHeight: '1.6', whiteSpace: 'pre-line', wordBreak: 'break-word', fontFamily: 'monospace, sans-serif', background: 'rgba(0, 0, 0, 0.25)', padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid rgba(239, 68, 68, 0.2)' }}>
                 {error}
               </div>
-              {error.toLowerCase().includes("subtitle") && (
-                <div style={{ marginTop: '0.75rem', padding: '0.6rem 0.85rem', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', borderLeft: '3px solid #f59e0b', fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
-                  💡 <strong>Tip:</strong> {t.errors.noSubtitlesTip}
-                </div>
-              )}
-              {(error.toLowerCase().includes("api key") || error.toLowerCase().includes("quota") || error.toLowerCase().includes("flash model") || error.toLowerCase().includes("aistudio") || error.toLowerCase().includes("rate limit")) && (
-                <div style={{ marginTop: '0.75rem', display: 'flex', flexWrap: 'wrap', gap: '0.6rem', alignItems: 'center' }}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const keyInput = document.getElementById('gemini-key-input') as HTMLInputElement | null;
-                      if (keyInput) {
-                        keyInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                        keyInput.focus();
-                        keyInput.select();
-                      }
-                    }}
-                    style={{
-                      background: 'rgba(239, 68, 68, 0.15)',
-                      border: '1px solid rgba(239, 68, 68, 0.4)',
-                      color: '#fca5a5',
-                      borderRadius: '8px',
-                      padding: '0.4rem 0.85rem',
-                      fontSize: '0.8rem',
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: '0.35rem',
-                      transition: 'all 0.2s ease'
-                    }}
-                  >
-                    🔑 {t.errors.changeApiKeyAction}
-                  </button>
-                  <a
-                    href="https://aistudio.google.com/app/apikey"
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{
-                      color: 'var(--primary)',
-                      fontSize: '0.8rem',
-                      textDecoration: 'underline',
-                      fontWeight: 500
-                    }}
-                  >
-                    {t.errors.getNewKeyLink}
-                  </a>
-                </div>
+              {/* Subtitle failure actions */}
+              {(error.toLowerCase().includes("subtitle") || error.toLowerCase().includes("transcript")) ? (
+                <>
+                  <div style={{ marginTop: '0.85rem', display: 'flex', flexWrap: 'wrap', gap: '0.65rem', alignItems: 'center' }}>
+                    <button
+                      type="button"
+                      className="glowing-btn"
+                      onClick={() => handleAnalyze()}
+                      disabled={loading}
+                      style={{
+                        padding: '0.45rem 1.15rem',
+                        fontSize: '0.85rem',
+                        borderRadius: '8px',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '0.45rem',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      <span className={loading ? "spinning-icon" : ""}>🔄</span>
+                      {t.errors.tryAgain}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSubtitlesSource('manual');
+                        const fileInput = document.getElementById('manual-subtitle-file');
+                        if (fileInput) fileInput.click();
+                      }}
+                      style={{
+                        background: 'rgba(255, 255, 255, 0.05)',
+                        border: '1px solid rgba(255, 255, 255, 0.15)',
+                        color: 'var(--text-primary)',
+                        borderRadius: '8px',
+                        padding: '0.45rem 0.85rem',
+                        fontSize: '0.8rem',
+                        fontWeight: 500,
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '0.35rem'
+                      }}
+                    >
+                      📄 {t.form.uploadCustomSubtitles}
+                    </button>
+                  </div>
+                  <div style={{ marginTop: '0.75rem', padding: '0.6rem 0.85rem', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', borderLeft: '3px solid #f59e0b', fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
+                    💡 <strong>Tip:</strong> {t.errors.noSubtitlesTip}
+                  </div>
+                </>
+              ) : (
+                /* Gemini API Key / AI Studio quota actions (Only if NOT a subtitle error) */
+                (error.toLowerCase().includes("api key") || error.toLowerCase().includes("quota") || error.toLowerCase().includes("flash model") || error.toLowerCase().includes("aistudio") || error.toLowerCase().includes("rate limit")) && (
+                  <div style={{ marginTop: '0.75rem', display: 'flex', flexWrap: 'wrap', gap: '0.6rem', alignItems: 'center' }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const keyInput = document.getElementById('gemini-key-input') as HTMLInputElement | null;
+                        if (keyInput) {
+                          keyInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                          keyInput.focus();
+                          keyInput.select();
+                        }
+                      }}
+                      style={{
+                        background: 'rgba(239, 68, 68, 0.15)',
+                        border: '1px solid rgba(239, 68, 68, 0.4)',
+                        color: '#fca5a5',
+                        borderRadius: '8px',
+                        padding: '0.4rem 0.85rem',
+                        fontSize: '0.8rem',
+                        fontWeight: 600,
+                        cursor: 'pointer',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '0.35rem',
+                        transition: 'all 0.2s ease'
+                      }}
+                    >
+                      🔑 {t.errors.changeApiKeyAction}
+                    </button>
+                    <a
+                      href="https://aistudio.google.com/app/apikey"
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{
+                        color: 'var(--primary)',
+                        fontSize: '0.8rem',
+                        textDecoration: 'underline',
+                        fontWeight: 500
+                      }}
+                    >
+                      {t.errors.getNewKeyLink}
+                    </a>
+                  </div>
+                )
               )}
             </div>
           </div>
