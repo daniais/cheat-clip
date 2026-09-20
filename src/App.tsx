@@ -2330,60 +2330,57 @@ Transcript:
             <span style={{ fontSize: '1.5rem', color: '#ef4444', lineHeight: 1, marginTop: '2px' }}>⚠️</span>
             <div style={{ flex: 1 }}>
               <h4 style={{ color: '#ef4444', margin: 0, fontSize: '1rem', fontWeight: 700 }}>{t.errors.analysisFailed}</h4>
-              {error.toLowerCase().includes("no subtitles") ? (
-                <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginTop: '0.25rem', lineHeight: '1.5' }}>
-                  {t.errors.noSubtitlesMsg}
-                  <br /><br />
-                  💡 <strong>Tip for Serverless Deployment (Vercel):</strong> {t.errors.noSubtitlesTip}
-                </p>
-              ) : (
-                <>
-                  <p style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', marginTop: '0.35rem', lineHeight: '1.5' }}>{error}</p>
-                  {(error.toLowerCase().includes("api key") || error.toLowerCase().includes("quota") || error.toLowerCase().includes("flash model") || error.toLowerCase().includes("aistudio") || error.toLowerCase().includes("rate limit")) && (
-                    <div style={{ marginTop: '0.75rem', display: 'flex', flexWrap: 'wrap', gap: '0.6rem', alignItems: 'center' }}>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const keyInput = document.getElementById('gemini-key-input') as HTMLInputElement | null;
-                          if (keyInput) {
-                            keyInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            keyInput.focus();
-                            keyInput.select();
-                          }
-                        }}
-                        style={{
-                          background: 'rgba(239, 68, 68, 0.15)',
-                          border: '1px solid rgba(239, 68, 68, 0.4)',
-                          color: '#fca5a5',
-                          borderRadius: '8px',
-                          padding: '0.4rem 0.85rem',
-                          fontSize: '0.8rem',
-                          fontWeight: 600,
-                          cursor: 'pointer',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '0.35rem',
-                          transition: 'all 0.2s ease'
-                        }}
-                      >
-                        🔑 {t.errors.changeApiKeyAction}
-                      </button>
-                      <a
-                        href="https://aistudio.google.com/app/apikey"
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{
-                          color: 'var(--primary)',
-                          fontSize: '0.8rem',
-                          textDecoration: 'underline',
-                          fontWeight: 500
-                        }}
-                      >
-                        {t.errors.getNewKeyLink}
-                      </a>
-                    </div>
-                  )}
-                </>
+              <div style={{ fontSize: '0.875rem', color: '#fca5a5', marginTop: '0.5rem', lineHeight: '1.6', whiteSpace: 'pre-line', wordBreak: 'break-word', fontFamily: 'monospace, sans-serif', background: 'rgba(0, 0, 0, 0.25)', padding: '0.75rem 1rem', borderRadius: '8px', border: '1px solid rgba(239, 68, 68, 0.2)' }}>
+                {error}
+              </div>
+              {error.toLowerCase().includes("subtitle") && (
+                <div style={{ marginTop: '0.75rem', padding: '0.6rem 0.85rem', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', borderLeft: '3px solid #f59e0b', fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
+                  💡 <strong>Tip:</strong> {t.errors.noSubtitlesTip}
+                </div>
+              )}
+              {(error.toLowerCase().includes("api key") || error.toLowerCase().includes("quota") || error.toLowerCase().includes("flash model") || error.toLowerCase().includes("aistudio") || error.toLowerCase().includes("rate limit")) && (
+                <div style={{ marginTop: '0.75rem', display: 'flex', flexWrap: 'wrap', gap: '0.6rem', alignItems: 'center' }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const keyInput = document.getElementById('gemini-key-input') as HTMLInputElement | null;
+                      if (keyInput) {
+                        keyInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        keyInput.focus();
+                        keyInput.select();
+                      }
+                    }}
+                    style={{
+                      background: 'rgba(239, 68, 68, 0.15)',
+                      border: '1px solid rgba(239, 68, 68, 0.4)',
+                      color: '#fca5a5',
+                      borderRadius: '8px',
+                      padding: '0.4rem 0.85rem',
+                      fontSize: '0.8rem',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '0.35rem',
+                      transition: 'all 0.2s ease'
+                    }}
+                  >
+                    🔑 {t.errors.changeApiKeyAction}
+                  </button>
+                  <a
+                    href="https://aistudio.google.com/app/apikey"
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      color: 'var(--primary)',
+                      fontSize: '0.8rem',
+                      textDecoration: 'underline',
+                      fontWeight: 500
+                    }}
+                  >
+                    {t.errors.getNewKeyLink}
+                  </a>
+                </div>
               )}
             </div>
           </div>

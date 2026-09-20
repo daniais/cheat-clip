@@ -31,6 +31,8 @@ from fastapi.responses import StreamingResponse, RedirectResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import yt_dlp
+import requests
+from urllib.parse import urlsplit
 from youtube_transcript_api import YouTubeTranscriptApi
 from google import genai
 from google.genai import types
@@ -267,8 +269,18 @@ def extract_video_id(url: str) -> Optional[str]:
         return trimmed
     return None
 
+class TimeoutSession(requests.Session):
+    """requests.Session that enforces a default timeout to avoid hanging indefinitely on slow proxies."""
+    def __init__(self, timeout: float = 12.0):
+        super().__init__()
+        self._default_timeout = timeout
+
+    def request(self, *args, **kwargs):
+        kwargs.setdefault("timeout", self._default_timeout)
+        return super().request(*args, **kwargs)
+
 def get_proxy_url() -> Optional[str]:
-    """Retrieves proxy URL from environment variables (PROXY_URL, WEBSHARE_PROXY, HTTPS_PROXY, HTTP_PROXY)."""
+    """Retrieves proxy URL from environment variables or synthesizes from Webshare credentials."""
     proxy = (
         os.environ.get("PROXY_URL")
         or os.environ.get("WEBSHARE_PROXY")
@@ -276,8 +288,78 @@ def get_proxy_url() -> Optional[str]:
         or os.environ.get("HTTP_PROXY")
         or os.environ.get("ALL_PROXY")
         or ""
-    )
-    return proxy.strip() or None
+    ).strip()
+    if proxy:
+        return proxy
+
+    # Synthesize URL from explicit Webshare credentials if provided
+    ws_user = os.environ.get("WEBSHARE_USERNAME", "").strip()
+    ws_pass = os.environ.get("WEBSHARE_PASSWORD", "").strip()
+    if ws_user and ws_pass:
+        ws_locations_raw = os.environ.get("WEBSHARE_LOCATIONS", "").strip()
+        loc_suffix = "".join(f"-{loc.strip().upper()}" for loc in ws_locations_raw.split(",") if loc.strip())
+        user_clean = ws_user[:-7] if ws_user.endswith("-rotate") else ws_user
+        return f"http://{user_clean}{loc_suffix}-rotate:{ws_pass}@p.webshare.io:80"
+
+    return None
+
+def get_youtube_transcript_proxy_config(custom_proxy: Optional[str] = None):
+    """
+    Constructs a ProxyConfig (WebshareProxyConfig or GenericProxyConfig)
+    for YouTubeTranscriptApi per official recommendations:
+    https://github.com/jdepoix/youtube-transcript-api#working-around-ip-bans-requestblocked-or-ipblocked-exception
+    """
+    from youtube_transcript_api.proxies import WebshareProxyConfig, GenericProxyConfig
+    from urllib.parse import urlsplit
+
+    ws_locations_raw = os.environ.get("WEBSHARE_LOCATIONS", "").strip()
+    ws_locations = [loc.strip() for loc in ws_locations_raw.split(",") if loc.strip()] if ws_locations_raw else None
+    try:
+        ws_retries = int(os.environ.get("WEBSHARE_RETRIES", "5"))
+    except ValueError:
+        ws_retries = 5
+
+    # 1. Explicit Webshare credentials from environment
+    ws_user = os.environ.get("WEBSHARE_USERNAME", "").strip()
+    ws_pass = os.environ.get("WEBSHARE_PASSWORD", "").strip()
+    if not custom_proxy and ws_user and ws_pass:
+        return WebshareProxyConfig(
+            proxy_username=ws_user,
+            proxy_password=ws_pass,
+            filter_ip_locations=ws_locations,
+            retries_when_blocked=ws_retries
+        )
+
+    # 2. Check full proxy URL (custom_proxy or from get_proxy_url())
+    proxy_url = (custom_proxy or get_proxy_url() or "").strip()
+    if not proxy_url:
+        return None
+
+    # Check if this proxy URL points to Webshare
+    if "webshare.io" in proxy_url.lower():
+        try:
+            parsed = urlsplit(proxy_url)
+            if parsed.username and parsed.password:
+                domain = parsed.hostname or "p.webshare.io"
+                port = parsed.port or 80
+                return WebshareProxyConfig(
+                    proxy_username=parsed.username,
+                    proxy_password=parsed.password,
+                    domain_name=domain,
+                    proxy_port=port,
+                    filter_ip_locations=ws_locations,
+                    retries_when_blocked=ws_retries
+                )
+        except Exception as e:
+            logger.warning(f"Failed parsing Webshare URL for WebshareProxyConfig: {e}")
+
+    # 3. GenericProxyConfig fallback for non-Webshare proxies
+    try:
+        return GenericProxyConfig(http_url=proxy_url, https_url=proxy_url)
+    except Exception as e:
+        logger.warning(f"Failed creating GenericProxyConfig: {e}")
+        return None
+
 
 def get_youtube_oembed_title(video_id_or_url: str) -> Optional[str]:
     """Fetches video title directly from YouTube's public oEmbed API.
@@ -395,19 +477,25 @@ def get_supadata_keys() -> List[str]:
         keys = [k.strip('\"\' ') for k in re.split(r'[,\s\n]+', raw) if k.strip('\"\' ')]
     return keys
 
-def fetch_transcript_supadata(video_id: str) -> List[dict]:
+def fetch_transcript_supadata(video_id: str, error_collector: Optional[List[str]] = None) -> List[dict]:
     """Fetches transcript from Supadata API, rotating through available keys if rate limits/quotas occur."""
     global _supadata_key_index
     import requests
     
     keys = get_supadata_keys()
     if not keys:
+        if error_collector is not None:
+            error_collector.append("Supadata API: No keys configured (SUPADATA_API_KEYS is empty in .env)")
         return []
 
     # Round-robin key rotation to evenly distribute load across keys
     start_idx = _supadata_key_index % len(keys)
     rotated_keys = keys[start_idx:] + keys[:start_idx]
     _supadata_key_index = (_supadata_key_index + 1) % len(keys)
+
+    quota_exhausted_count = 0
+    not_found = False
+    last_error = ""
 
     for key in rotated_keys:
         masked_key = f"{key[:7]}...{key[-4:]}" if len(key) >= 11 else "***"
@@ -417,7 +505,7 @@ def fetch_transcript_supadata(video_id: str) -> List[dict]:
                 "https://api.supadata.ai/v1/youtube/transcript",
                 headers={"x-api-key": key},
                 params={"videoId": video_id},
-                timeout=25
+                timeout=12
             )
             if response.status_code == 200:
                 data = response.json()
@@ -436,14 +524,32 @@ def fetch_transcript_supadata(video_id: str) -> List[dict]:
                         global _supadata_usage_cache
                         _supadata_usage_cache["timestamp"] = 0
                         return result
-            elif response.status_code in (429, 402, 403, 401):
+            elif response.status_code in (429, 402):
+                quota_exhausted_count += 1
                 logger.warning(f"Supadata key {masked_key} returned status {response.status_code} (quota/limit). Rotating to next key...")
                 continue
+            elif response.status_code == 404:
+                not_found = True
+                last_error = "HTTP 404 (No subtitles found for this video on YouTube)"
+                logger.warning(f"Supadata key {masked_key} returned status 404: No subtitles found")
+                break
             else:
+                last_error = f"HTTP {response.status_code}: {response.text[:100]}"
                 logger.warning(f"Supadata key {masked_key} returned status {response.status_code}: {response.text[:100]}")
         except Exception as e:
+            last_error = str(e)
             logger.warning(f"Supadata request with key {masked_key} failed: {e}")
             continue
+
+    if error_collector is not None:
+        if quota_exhausted_count == len(keys):
+            error_collector.append(f"Supadata API: All {len(keys)} configured API keys exhausted (HTTP 429/402 Monthly Quota Exceeded)")
+        elif not_found:
+            error_collector.append(f"Supadata API: {last_error}")
+        elif last_error:
+            error_collector.append(f"Supadata API: Requests failed across all keys ({last_error})")
+        else:
+            error_collector.append("Supadata API: Transcript content was empty")
 
     return []
 
@@ -620,14 +726,12 @@ def fetch_transcript_ytdlp(video_id: str, proxy: Optional[str] = None) -> List[d
 
 def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[dict]:
     """Retrieves subtitles.
-    On Vercel / serverless cloud environments, prioritizes rotating Supadata
-    to avoid datacenter IP bans and 10s execution timeouts. Locally, prioritizes free direct fetch first:
-      1. Direct YouTubeTranscriptApi.fetch() (priority languages, no proxy)
-      2. Direct YouTubeTranscriptApi.list() (manual and auto captions, no proxy)
-      3. Direct yt-dlp native extraction (no proxy)
-      4. Supadata API fallback (if configured)
-    If all standard strategies fail to retrieve subtitles:
-      5. Fallback to using proxy as the last resort to try.
+    Fallback order:
+      1. Supadata API (if keys configured) — ideal for cloud/serverless/VPS environments to bypass YouTube datacenter IP blocks.
+      2. Proxy Fallback (YouTubeTranscriptApi with WebshareProxyConfig/GenericProxyConfig + yt-dlp via proxy)
+         per https://github.com/jdepoix/youtube-transcript-api#working-around-ip-bans-requestblocked-or-ipblocked-exception
+      3. Direct fetch fallback (direct YouTubeTranscriptApi + direct yt-dlp) for localhost/residential IPs.
+    If all strategies fail, raises a clear, detailed HTTPException showing exact errors from every method attempted.
     """
 
     def to_dict_list(fetched) -> List[dict]:
@@ -640,94 +744,47 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
             for line in fetched
         ]
 
-    keys = get_supadata_keys()
-    is_vercel = bool(os.environ.get("VERCEL") or os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
-
-    # ── On Vercel / Serverless: Use Supadata First if Available ──────────────
-    # YouTube strictly blocks all Vercel/AWS datacenter IPs. Trying multiple scraping
-    # attempts on Vercel burns 20+ seconds and triggers Vercel Gateway Timeouts.
-    if is_vercel and keys:
-        logger.info("Vercel deployment detected — utilizing Supadata API for cloud transcript retrieval")
-        supadata_data = fetch_transcript_supadata(video_id)
-        if supadata_data:
-            return supadata_data
-
-    # ── Strategy 1: Fast direct fetch (works on localhost/residential IPs) ─────
     priority_langs = ['id', 'en', 'es', 'pt', 'fr', 'de', 'ja', 'ko', 'zh-Hans', 'zh-Hant', 'ar', 'hi', 'ru']
-    api = YouTubeTranscriptApi()
-    try:
-        # Pass all priority languages in ONE single network request (fast!)
-        data = to_dict_list(api.fetch(video_id, languages=priority_langs))
-        if data:
-            logger.info("Transcript fetched via direct YouTube fetch")
-            return data
-    except Exception as e:
-        logger.info(f"Direct fetch missed: {e}")
+    keys = get_supadata_keys()
+    proxy_url = custom_proxy or get_proxy_url()
+    proxy_cfg = get_youtube_transcript_proxy_config(custom_proxy)
+    attempt_history: List[str] = []
 
-    # ── Strategy 2: List all transcripts (manual then auto) ────────────────────
-    try:
-        all_transcripts = list(api.list(video_id))
-        manual    = [t for t in all_transcripts if not getattr(t, 'is_generated', False)]
-        generated = [t for t in all_transcripts if     getattr(t, 'is_generated', False)]
-
-        for transcript in (manual + generated):
-            try:
-                data = to_dict_list(transcript.fetch())
-                if data:
-                    logger.info(
-                        f"Transcript fetched via list: {transcript.language} "
-                        f"({'auto' if getattr(transcript, 'is_generated', False) else 'manual'})"
-                    )
-                    return data
-            except Exception as e:
-                logger.warning(f"Failed ({transcript.language_code}): {e}")
-                continue
-    except Exception as e:
-        logger.warning(f"Could not list transcripts: {e}")
-
-    # ── Strategy 3: yt-dlp native extraction fallback (direct, free, no proxy) ──
-    ytdlp_data = fetch_transcript_ytdlp(video_id, proxy=None)
-    if ytdlp_data:
-        return ytdlp_data
-
-    # ── Strategy 4: Supadata API fallback (for localhost when direct fails) ────
+    # ── Strategy 1: Supadata API (if keys configured) ─────────────────────────
     if keys:
-        supadata_data = fetch_transcript_supadata(video_id)
+        logger.info(f"Attempting transcript retrieval via Supadata API ({len(keys)} keys configured)...")
+        supadata_data = fetch_transcript_supadata(video_id, error_collector=attempt_history)
         if supadata_data:
             return supadata_data
+        logger.info("Supadata API attempt unsuccessful — proceeding to proxy fallback...")
+    else:
+        attempt_history.append("Supadata API: Not configured (no keys in SUPADATA_API_KEYS)")
 
-    # ── Strategy 5: Proxy Fallback as Last Resort ─────────────────────────────
-    # When all direct scraping and API strategies fail to fetch subtitles,
-    # attempt retrieval using proxy as the last resort to try.
-    proxy = custom_proxy or get_proxy_url()
-    if proxy:
-        masked_proxy = proxy.split('@')[-1] if '@' in proxy else proxy
-        logger.info(f"Standard subtitle retrieval failed — falling back to proxy as last resort ({masked_proxy})...")
+    # ── Strategy 2: Proxy Fallback (Webshare or Generic Proxy) ────────────────
+    if proxy_cfg or proxy_url:
+        masked_proxy = proxy_url.split('@')[-1] if (proxy_url and '@' in proxy_url) else (proxy_url or "Configured Proxy")
+        logger.info(f"Attempting subtitle retrieval via proxy fallback ({masked_proxy})...")
 
-        # 5a. yt-dlp native extraction routed through proxy
+        # 2a. YouTubeTranscriptApi routed through ProxyConfig with TimeoutSession
         try:
-            proxy_ytdlp_data = fetch_transcript_ytdlp(video_id, proxy=proxy)
-            if proxy_ytdlp_data:
-                logger.info(f"Transcript fetched via proxy fallback (yt-dlp): {len(proxy_ytdlp_data)} lines")
-                return proxy_ytdlp_data
-        except Exception as e:
-            logger.warning(f"Proxy fallback via yt-dlp failed: {e}")
-
-        # 5b. YouTubeTranscriptApi routed through GenericProxyConfig
-        try:
-            from youtube_transcript_api.proxies import GenericProxyConfig
-            proxy_cfg = GenericProxyConfig(http_url=proxy, https_url=proxy)
-            proxy_api = YouTubeTranscriptApi(proxy_config=proxy_cfg)
+            session = TimeoutSession(timeout=15.0)
+            proxy_api = YouTubeTranscriptApi(proxy_config=proxy_cfg, http_client=session)
+            
+            # Fast direct fetch with priority languages
             try:
                 data = to_dict_list(proxy_api.fetch(video_id, languages=priority_langs))
                 if data:
                     logger.info(f"Transcript fetched via proxy fallback (YouTubeTranscriptApi direct): {len(data)} lines")
                     return data
-            except Exception as e:
-                logger.info(f"Proxy YouTubeTranscriptApi direct missed: {e}")
+            except Exception as direct_err:
+                logger.info(f"Proxy YouTubeTranscriptApi direct language fetch missed: {direct_err}")
 
+            # List and fetch all available transcripts (manual then auto)
             try:
-                for t in list(proxy_api.list(video_id)):
+                transcripts = list(proxy_api.list(video_id))
+                manual = [t for t in transcripts if not getattr(t, 'is_generated', False)]
+                generated = [t for t in transcripts if getattr(t, 'is_generated', False)]
+                for t in (manual + generated):
                     try:
                         data = to_dict_list(t.fetch())
                         if data:
@@ -735,22 +792,105 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None) -> List[
                             return data
                     except Exception:
                         continue
-            except Exception as e:
-                logger.info(f"Proxy YouTubeTranscriptApi list missed: {e}")
-        except Exception as e:
-            logger.warning(f"Proxy fallback via YouTubeTranscriptApi failed: {e}")
-    else:
-        logger.info("No proxy configured (PROXY_URL or WEBSHARE_PROXY) to attempt proxy fallback.")
+                attempt_history.append(f"YouTubeTranscriptApi (proxy): No accessible transcript found in {len(transcripts)} available tracks")
+            except Exception as list_err:
+                err_type = type(list_err).__name__
+                err_msg = str(list_err).strip().split('\n')[0]
+                attempt_history.append(f"YouTubeTranscriptApi (proxy): {err_type} ({err_msg})")
+        except Exception as init_err:
+            attempt_history.append(f"YouTubeTranscriptApi (proxy setup): {type(init_err).__name__} ({init_err})")
 
-    # ── All strategies exhausted ──────────────────────────────────────────────
-    raise HTTPException(
-        status_code=400,
-        detail=(
-            "No subtitles could be retrieved for this video. "
-            "All standard methods and proxy fallback were exhausted. "
-            "Subtitles might be disabled, or the video may be age-restricted, private, or require a login."
-        )
-    )
+        # 2b. yt-dlp native extraction routed through proxy
+        try:
+            proxy_ytdlp_data = fetch_transcript_ytdlp(video_id, proxy=proxy_url)
+            if proxy_ytdlp_data:
+                logger.info(f"Transcript fetched via proxy fallback (yt-dlp): {len(proxy_ytdlp_data)} lines")
+                return proxy_ytdlp_data
+            else:
+                attempt_history.append("yt-dlp (proxy): No subtitle streams found or extraction returned empty")
+        except Exception as ytdlp_err:
+            attempt_history.append(f"yt-dlp (proxy): {type(ytdlp_err).__name__} ({str(ytdlp_err)[:150]})")
+    else:
+        attempt_history.append("Proxy Fallback: No proxy configured (WEBSHARE_PROXY, WEBSHARE_USERNAME, or PROXY_URL is unset in .env)")
+
+    # ── Strategy 3: Direct Fetch Fallback (Localhost / Residential IP) ─────────
+    logger.info("Attempting direct YouTube transcript retrieval (no proxy)...")
+    try:
+        direct_session = TimeoutSession(timeout=10.0)
+        direct_api = YouTubeTranscriptApi(http_client=direct_session)
+        try:
+            data = to_dict_list(direct_api.fetch(video_id, languages=priority_langs))
+            if data:
+                logger.info(f"Transcript fetched via direct YouTube fetch: {len(data)} lines")
+                return data
+        except Exception:
+            pass
+
+        try:
+            all_transcripts = list(direct_api.list(video_id))
+            manual = [t for t in all_transcripts if not getattr(t, 'is_generated', False)]
+            generated = [t for t in all_transcripts if getattr(t, 'is_generated', False)]
+            for transcript in (manual + generated):
+                try:
+                    data = to_dict_list(transcript.fetch())
+                    if data:
+                        logger.info(f"Transcript fetched via direct list ({transcript.language}): {len(data)} lines")
+                        return data
+                except Exception:
+                    continue
+            attempt_history.append(f"Direct YouTube API: No accessible tracks in {len(all_transcripts)} tracks")
+        except Exception as list_err:
+            err_type = type(list_err).__name__
+            err_msg = str(list_err).strip().split('\n')[0]
+            attempt_history.append(f"Direct YouTube API: {err_type} ({err_msg})")
+    except Exception as api_err:
+        attempt_history.append(f"Direct YouTube API: {type(api_err).__name__} ({str(api_err)[:150]})")
+
+    # 3b. Direct yt-dlp native extraction
+    try:
+        ytdlp_data = fetch_transcript_ytdlp(video_id, proxy=None)
+        if ytdlp_data:
+            logger.info(f"Transcript fetched via direct yt-dlp: {len(ytdlp_data)} lines")
+            return ytdlp_data
+        else:
+            attempt_history.append("Direct yt-dlp: No subtitle streams found")
+    except Exception as ytdlp_err:
+        attempt_history.append(f"Direct yt-dlp: {type(ytdlp_err).__name__} ({str(ytdlp_err)[:150]})")
+
+    # ── All strategies exhausted: Construct Clear, Actionable Error ───────────
+    combined_history = " ".join(attempt_history)
+    root_cause = []
+    if "TranscriptsDisabled" in combined_history:
+        root_cause.append("Subtitles are disabled for this video by the creator.")
+    elif "AgeRestricted" in combined_history:
+        root_cause.append("Video is age-restricted and requires YouTube authentication.")
+    elif "VideoUnavailable" in combined_history:
+        root_cause.append("Video is private or unavailable.")
+    elif "IpBlocked" in combined_history or "RequestBlocked" in combined_history:
+        root_cause.append("YouTube blocked the IP address (datacenter IP ban / RequestBlocked).")
+
+    error_lines = [
+        f"Unable to retrieve subtitles for YouTube video ID '{video_id}'."
+    ]
+    if root_cause:
+        error_lines.append(f"Probable Cause: {' '.join(root_cause)}")
+
+    error_lines.append("\nMethods attempted and diagnostic results:")
+    for h in attempt_history:
+        error_lines.append(f"  • {h}")
+
+    error_lines.append("\nRecommended solutions:")
+    if not (proxy_cfg or proxy_url):
+        error_lines.append("  1. Configure a proxy in backend/.env (e.g. WEBSHARE_USERNAME & WEBSHARE_PASSWORD, or WEBSHARE_PROXY / PROXY_URL) to bypass datacenter IP bans.")
+    else:
+        error_lines.append("  1. Verify your proxy quota/credentials in backend/.env or rotate your residential proxy IP.")
+    if keys:
+        error_lines.append("  2. Check your Supadata API usage or add fresh API keys to SUPADATA_API_KEYS in backend/.env.")
+    error_lines.append("  3. Upload custom subtitles manually (.srt or .txt file) using the 'Upload Custom Subtitle' setting above.")
+
+    full_error_detail = "\n".join(error_lines)
+    logger.error(f"Subtitle retrieval exhausted all methods:\n{full_error_detail}")
+    raise HTTPException(status_code=400, detail=full_error_detail)
 
 
 
