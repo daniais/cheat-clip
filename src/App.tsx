@@ -165,6 +165,7 @@ export default function App() {
   const loadingSectionRef = useRef<HTMLElement | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [copyTimestampMenuTarget, setCopyTimestampMenuTarget] = useState<'toolbar' | 'overview' | null>(null);
+  const [copyTimestampScope, setCopyTimestampScope] = useState<'all' | 'marked'>('all');
 
   // Close timestamp format menu on click outside or escape
   useEffect(() => {
@@ -1001,27 +1002,54 @@ Transcript:
     });
   };
 
+  const markedClipsCount = useMemo(() => {
+    if (!result?.clips) return 0;
+    return result.clips.filter(clip => !!markedClips[`${clip.start_time}_${clip.end_time}`]).length;
+  }, [result?.clips, markedClips]);
+
   const handleCopyAllTimestampsFormat = (format: 'only' | 'with_title' | 'youtube', e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     setCopyTimestampMenuTarget(null);
     if (!result || !result.clips || result.clips.length === 0) return;
 
+    const targetClips = copyTimestampScope === 'marked'
+      ? result.clips.filter(clip => !!markedClips[`${clip.start_time}_${clip.end_time}`])
+      : result.clips;
+
+    if (targetClips.length === 0) {
+      setToastMessage(t.results.noMarkedClipsToast);
+      setTimeout(() => setToastMessage(null), 3500);
+      return;
+    }
+
     let text = '';
     if (format === 'only') {
-      text = result.clips
+      text = targetClips
         .map(clip => `${formatSeconds(clip.start_time)} - ${formatSeconds(clip.end_time)}`)
         .join('\n');
-      setToastMessage(t.results.copiedTimestampsOnlyToast(result.clips.length));
+      setToastMessage(
+        copyTimestampScope === 'marked'
+          ? t.results.copiedMarkedTimestampsOnlyToast(targetClips.length)
+          : t.results.copiedTimestampsOnlyToast(targetClips.length)
+      );
     } else if (format === 'with_title') {
-      text = result.clips
+      text = targetClips
         .map(clip => `${formatSeconds(clip.start_time)} - ${formatSeconds(clip.end_time)} | ${clip.title}`)
         .join('\n');
-      setToastMessage(t.results.copiedTimestampsWithTitlesToast(result.clips.length));
+      setToastMessage(
+        copyTimestampScope === 'marked'
+          ? t.results.copiedMarkedTimestampsWithTitlesToast(targetClips.length)
+          : t.results.copiedTimestampsWithTitlesToast(targetClips.length)
+      );
     } else if (format === 'youtube') {
-      text = result.clips
+      text = targetClips
         .map(clip => `${formatSeconds(clip.start_time)} ${clip.title}`)
         .join('\n');
-      setToastMessage(t.results.copiedTimestampsYoutubeToast(result.clips.length));
+      setToastMessage(
+        copyTimestampScope === 'marked'
+          ? t.results.copiedMarkedTimestampsYoutubeToast(targetClips.length)
+          : t.results.copiedTimestampsYoutubeToast(targetClips.length)
+      );
     }
 
     navigator.clipboard.writeText(text).then(() => {
@@ -1040,7 +1068,45 @@ Transcript:
       onClick={(e) => e.stopPropagation()}
       style={{ [align]: 0 }}
     >
-      <div style={{ padding: '0.25rem 0.6rem 0.15rem', fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+      <div className="timestamp-scope-container">
+        <div className="timestamp-scope-label">
+          {t.results.copyTimestampsScope}
+        </div>
+        <div className="timestamp-scope-tabs">
+          <button
+            type="button"
+            className={`timestamp-scope-tab ${copyTimestampScope === 'all' ? 'active-all' : ''}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setCopyTimestampScope('all');
+            }}
+          >
+            <span>{t.results.copyScopeAll}</span>
+            <span className="timestamp-scope-badge">{result?.clips.length || 0}</span>
+          </button>
+          <button
+            type="button"
+            className={`timestamp-scope-tab ${copyTimestampScope === 'marked' ? 'active-marked' : ''}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              setCopyTimestampScope('marked');
+            }}
+          >
+            <span>🔖 {t.results.copyScopeMarked}</span>
+            <span className="timestamp-scope-badge">{markedClipsCount}</span>
+          </button>
+        </div>
+      </div>
+
+      {copyTimestampScope === 'marked' && markedClipsCount === 0 && (
+        <div className="timestamp-empty-notice">
+          {t.results.noMarkedClipsNotice}
+        </div>
+      )}
+
+      <div className="timestamp-menu-divider" />
+
+      <div style={{ padding: '0.2rem 0.6rem 0.15rem', fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
         {t.results.copyAllTimestampsSelectFormat}
       </div>
 
@@ -1048,6 +1114,7 @@ Transcript:
         type="button"
         className="timestamp-menu-item"
         onClick={(e) => handleCopyAllTimestampsFormat('only', e)}
+        style={copyTimestampScope === 'marked' && markedClipsCount === 0 ? { opacity: 0.55 } : undefined}
       >
         <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--secondary)', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
           {t.results.copyFormatOnlyTimestamps}
@@ -1061,6 +1128,7 @@ Transcript:
         type="button"
         className="timestamp-menu-item"
         onClick={(e) => handleCopyAllTimestampsFormat('with_title', e)}
+        style={copyTimestampScope === 'marked' && markedClipsCount === 0 ? { opacity: 0.55 } : undefined}
       >
         <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
           {t.results.copyFormatWithTitles}
@@ -1070,12 +1138,13 @@ Transcript:
         </span>
       </button>
 
-      <div style={{ height: '1px', background: 'rgba(255, 255, 255, 0.07)', margin: '0.15rem 0' }} />
+      <div className="timestamp-menu-divider" />
 
       <button
         type="button"
         className="timestamp-menu-item"
         onClick={(e) => handleCopyAllTimestampsFormat('youtube', e)}
+        style={copyTimestampScope === 'marked' && markedClipsCount === 0 ? { opacity: 0.55 } : undefined}
       >
         <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
           {t.results.copyFormatYoutube}
@@ -2490,7 +2559,7 @@ Transcript:
                     <button
                       type="button"
                       onClick={(e) => toggleTimestampMenu('overview', e)}
-                      title={t.results.copyAllTimestampsTooltip}
+                      title={copyTimestampScope === 'marked' ? t.results.copyMarkedTimestampsTooltip(markedClipsCount) : t.results.copyAllTimestampsTooltip}
                       style={{
                         fontSize: '0.72rem',
                         padding: '0.2rem 0.55rem',
@@ -2518,7 +2587,13 @@ Transcript:
                         }
                       }}
                     >
-                      {t.results.copyAllTimestamps} ▾
+                      {t.results.copyAllTimestamps}
+                      {copyTimestampScope === 'marked' && (
+                        <span style={{ fontSize: '0.65rem', padding: '0.05rem 0.3rem', borderRadius: '4px', background: 'rgba(16, 185, 129, 0.25)', color: '#34d399', fontWeight: 700 }}>
+                          🔖 {markedClipsCount}
+                        </span>
+                      )}
+                      <span>▾</span>
                     </button>
                     {copyTimestampMenuTarget === 'overview' && renderTimestampFormatMenu('right')}
                   </div>
@@ -2717,10 +2792,16 @@ Transcript:
                       type="button"
                       className="action-link-btn"
                       onClick={(e) => toggleTimestampMenu('toolbar', e)}
-                      title={t.results.copyAllTimestampsTooltip}
-                      style={{ background: 'none', border: 'none', color: 'var(--secondary)', cursor: 'pointer', fontWeight: 600, fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.2rem' }}
+                      title={copyTimestampScope === 'marked' ? t.results.copyMarkedTimestampsTooltip(markedClipsCount) : t.results.copyAllTimestampsTooltip}
+                      style={{ background: 'none', border: 'none', color: 'var(--secondary)', cursor: 'pointer', fontWeight: 600, fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
                     >
-                      {t.results.copyAllTimestamps} ▾
+                      {t.results.copyAllTimestamps}
+                      {copyTimestampScope === 'marked' && (
+                        <span style={{ fontSize: '0.65rem', padding: '0.05rem 0.3rem', borderRadius: '4px', background: 'rgba(16, 185, 129, 0.25)', color: '#34d399', fontWeight: 700 }}>
+                          🔖 {markedClipsCount}
+                        </span>
+                      )}
+                      <span>▾</span>
                     </button>
                     {copyTimestampMenuTarget === 'toolbar' && renderTimestampFormatMenu('left')}
                   </div>
