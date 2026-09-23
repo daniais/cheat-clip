@@ -16,18 +16,15 @@ export default function App() {
   const { t } = useLanguage();
   const [url, setUrl] = useState('');
   const [durationPref, setDurationPref] = useState<'15s' | '30s' | '60s'>('30s');
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('cheat_clip_gemini_api_key') || '');
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('cheat_clip_api_key') || '');
   const [showApiKey, setShowApiKey] = useState(false);
+  const [apiBaseUrl, setApiBaseUrl] = useState(() => localStorage.getItem('cheat_clip_api_base_url') || 'https://api.openai.com/v1');
+  const [showApiBaseUrl, setShowApiBaseUrl] = useState(false);
 
   // AI model selection and custom focus prompt states
   const [selectedModel, setSelectedModel] = useState<string>(() => {
     const saved = localStorage.getItem('cheat_clip_selected_model');
-    // Auto-migrate outdated 1.0 models to gemini-2.5-flash
-    if (saved && (saved.includes('1.0') || saved.includes('vision'))) {
-      localStorage.setItem('cheat_clip_selected_model', 'gemini-2.5-flash');
-      return 'gemini-2.5-flash';
-    }
-    return saved || 'gemini-2.5-flash';
+    return saved || 'gpt-4o-mini';
   });
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [loadingModels, setLoadingModels] = useState(false);
@@ -235,13 +232,13 @@ export default function App() {
       }
       setLoadingModels(true);
       try {
-        const res = await fetch(`/api/models?api_key=${encodeURIComponent(cleanKey)}`);
+        const res = await fetch(`/api/models?api_key=${encodeURIComponent(cleanKey)}&api_base_url=${encodeURIComponent(apiBaseUrl.trim())}`);
         if (res.ok) {
           const data = await res.json();
           if (data.models && data.models.length > 0) {
             setAvailableModels(data.models);
-            if (!data.models.includes(selectedModel) || selectedModel.includes('1.5') || selectedModel.includes('1.0')) {
-              const fallback = data.models.find((m: string) => m.includes('flash')) || data.models[0] || 'gemini-2.5-flash';
+            if (!data.models.includes(selectedModel)) {
+              const fallback = data.models[0] || 'gpt-4o-mini';
               setSelectedModel(fallback);
               localStorage.setItem('cheat_clip_selected_model', fallback);
             }
@@ -259,7 +256,7 @@ export default function App() {
     }, 600);
 
     return () => clearTimeout(delayDebounce);
-  }, [apiKey]);
+  }, [apiKey, apiBaseUrl]);
 
   // Sync marked clips with local storage based on active video ID
   useEffect(() => {
@@ -787,6 +784,7 @@ export default function App() {
           url: url.trim(),
           duration: durationPref,
           api_key: apiKey.trim() || undefined,
+          api_base_url: apiBaseUrl.trim() || undefined,
           model: selectedModel,
           custom_prompt: customPrompt.trim() || undefined,
           range_start: rangeStartSecs,
@@ -1465,7 +1463,7 @@ Transcript:
                   </span>
                   <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                     <a
-                      href="https://aistudio.google.com/"
+                      href="https://openrouter.ai/keys"
                       target="_blank"
                       rel="noopener noreferrer"
                       style={{ color: 'var(--primary)', textDecoration: 'none', fontSize: '0.75rem', fontWeight: 600, transition: 'var(--transition-smooth)' }}
@@ -1483,7 +1481,7 @@ Transcript:
                   </div>
                 </label>
                 <input
-                  id="gemini-key-input"
+                  id="api-key-input"
                   type={showApiKey ? 'text' : 'password'}
                   className={`form-input${!apiKey.trim() ? ' input-error-highlight' : ''}`}
                   placeholder={t.form.apiKeyPlaceholder}
@@ -1491,7 +1489,7 @@ Transcript:
                   onChange={(e) => {
                     const val = e.target.value;
                     setApiKey(val);
-                    localStorage.setItem('cheat_clip_gemini_api_key', val);
+                    localStorage.setItem('cheat_clip_api_key', val);
                     if (val.trim()) setError(null);
                   }}
                   disabled={loading}
@@ -1503,6 +1501,35 @@ Transcript:
                     {t.form.apiKeyErrorHint}
                   </span>
                 )}
+              </div>
+
+              {/* API Base URL */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                <label style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.875rem', fontWeight: 600, color: 'var(--text-secondary)' }}>
+                  <span>{t.form.apiBaseUrlLabel}</span>
+                  <span
+                    onClick={() => setShowApiBaseUrl(!showApiBaseUrl)}
+                    style={{ cursor: 'pointer', color: 'var(--primary)', fontSize: '0.75rem' }}
+                  >
+                    {showApiBaseUrl ? t.form.hideKey : t.form.showKey}
+                  </span>
+                </label>
+                <input
+                  type={showApiBaseUrl ? 'text' : 'password'}
+                  className="form-input"
+                  placeholder={t.form.apiBaseUrlPlaceholder}
+                  value={apiBaseUrl}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setApiBaseUrl(val);
+                    localStorage.setItem('cheat_clip_api_base_url', val);
+                  }}
+                  disabled={loading}
+                  style={{ height: '42px' }}
+                />
+                <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.4, marginTop: '0.2rem' }}>
+                  💡 {t.form.apiBaseUrlTip}
+                </span>
               </div>
 
               {/* AI Model Selection */}
@@ -1533,12 +1560,12 @@ Transcript:
                     ))
                   ) : (
                     <>
-                      <option value="gemini-2.5-flash" style={{ background: '#0d1324', color: '#fff' }}>gemini-2.5-flash (Fast & recommended - Free tier friendly)</option>
-                      <option value="gemini-2.5-flash-lite" style={{ background: '#0d1324', color: '#fff' }}>gemini-2.5-flash-lite (Ultra-fast & lightweight)</option>
-                      <option value="gemini-2.0-flash" style={{ background: '#0d1324', color: '#fff' }}>gemini-2.0-flash (Fast & responsive)</option>
-                      <option value="gemini-2.0-flash-lite" style={{ background: '#0d1324', color: '#fff' }}>gemini-2.0-flash-lite (Lightweight flash)</option>
-                      <option value="gemini-1.5-flash" style={{ background: '#0d1324', color: '#fff' }}>gemini-1.5-flash (Fallback flash)</option>
-                      <option value="gemini-2.5-pro" style={{ background: '#0d1324', color: '#fff' }}>gemini-2.5-pro (Creative & complex - High quota)</option>
+                      <option value="gpt-4o-mini" style={{ background: '#0d1324', color: '#fff' }}>gpt-4o-mini (Fast & cheap)</option>
+                      <option value="gpt-4o" style={{ background: '#0d1324', color: '#fff' }}>gpt-4o (Powerful)</option>
+                      <option value="deepseek/deepseek-v4-flash" style={{ background: '#0d1324', color: '#fff' }}>DeepSeek V4 Flash (Cheap & fast)</option>
+                      <option value="deepseek/deepseek-v3" style={{ background: '#0d1324', color: '#fff' }}>DeepSeek V3 (Powerful)</option>
+                      <option value="anthropic/claude-sonnet-4" style={{ background: '#0d1324', color: '#fff' }}>Claude Sonnet 4</option>
+                      <option value="google/gemini-2.5-flash" style={{ background: '#0d1324', color: '#fff' }}>Gemini 2.5 Flash</option>
                     </>
                   )}
                 </select>
@@ -2205,13 +2232,13 @@ Transcript:
                   </div>
                 </>
               ) : (
-                /* Gemini API Key / AI Studio quota actions (Only if NOT a subtitle error) */
-                (error.toLowerCase().includes("api key") || error.toLowerCase().includes("quota") || error.toLowerCase().includes("flash model") || error.toLowerCase().includes("aistudio") || error.toLowerCase().includes("rate limit")) && (
+                /* API Key / quota actions */
+                (error.toLowerCase().includes("api key") || error.toLowerCase().includes("quota") || error.toLowerCase().includes("rate limit") || error.toLowerCase().includes("model") || error.toLowerCase().includes("unauthorized")) && (
                   <div style={{ marginTop: '0.75rem', display: 'flex', flexWrap: 'wrap', gap: '0.6rem', alignItems: 'center' }}>
                     <button
                       type="button"
                       onClick={() => {
-                        const keyInput = document.getElementById('gemini-key-input') as HTMLInputElement | null;
+                        const keyInput = document.getElementById('api-key-input') as HTMLInputElement | null;
                         if (keyInput) {
                           keyInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
                           keyInput.focus();
@@ -2236,7 +2263,7 @@ Transcript:
                       🔑 {t.errors.changeApiKeyAction}
                     </button>
                     <a
-                      href="https://aistudio.google.com/app/apikey"
+                      href="https://openrouter.ai/keys"
                       target="_blank"
                       rel="noreferrer"
                       style={{
