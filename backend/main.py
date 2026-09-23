@@ -528,43 +528,70 @@ def get_supadata_usage_data(force: bool = False) -> dict:
 
 def fetch_transcript_ytdlp(video_id: str, proxy: Optional[str] = None) -> List[dict]:
     import requests
-    ydl_opts = {'skip_download': True, 'quiet': True, 'no_warnings': True, 'nocheckcertificate': True, 'proxy': proxy, 'socket_timeout': 10}
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
-            if not info:
-                return []
-            subtitles = info.get('subtitles') or {}
-            auto_subtitles = info.get('automatic_captions') or {}
-            priority_langs = ['id', 'en', 'es', 'pt', 'fr', 'de', 'ja', 'ko', 'zh-Hans', 'zh-Hant', 'ar', 'hi', 'ru']
-            for lang_dict, is_auto in [(subtitles, False), (auto_subtitles, True)]:
-                langs_to_try = [l for l in priority_langs if l in lang_dict] + [l for l in lang_dict if l not in priority_langs]
-                for lang in langs_to_try:
-                    formats = lang_dict.get(lang) or []
-                    json3_entry = next((f['url'] for f in formats if f.get('ext') == 'json3'), None)
-                    if json3_entry:
-                        proxies_dict = {'http': proxy, 'https': proxy} if proxy else None
-                        attempts = [proxies_dict, None] if proxy else [None]
-                        for p in attempts:
-                            try:
-                                r = requests.get(json3_entry, proxies=p, timeout=8)
-                                if r.status_code == 200:
-                                    events = r.json().get('events', [])
-                                    result = []
-                                    for ev in events:
-                                        segs = ev.get('segs', [])
-                                        text = ''.join(s.get('utf8', '') for s in segs).strip()
-                                        if text:
-                                            start = ev.get('tStartMs', 0) / 1000.0
-                                            dur = ev.get('dDurationMs', 0) / 1000.0
-                                            result.append({'text': text, 'start': start, 'duration': dur})
-                                    if result:
-                                        logger.info(f"Transcript fetched via yt-dlp (lang={lang})")
-                                        return result
-                            except Exception:
-                                continue
-    except Exception as e:
-        logger.warning(f"yt-dlp subtitle extraction failed: {e}")
+    import random
+    # Try multiple player clients — android & tv clients are rarely blocked on datacenter IPs
+    player_clients = [
+        ['android', 'android_music', 'android_creator'],
+        ['android', 'web'],
+        ['web', 'android'],
+        ['tv', 'android'],
+    ]
+    priority_langs = ['id', 'en', 'es', 'pt', 'fr', 'de', 'ja', 'ko', 'zh-Hans', 'zh-Hant', 'ar', 'hi', 'ru']
+    user_agents = [
+        'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36',
+        'Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.6045.163 Mobile Safari/537.36',
+        'com.google.android.youtube/19.45.36 (Linux; Android 14) gzip',
+    ]
+    for clients in player_clients:
+        ua = random.choice(user_agents)
+        ydl_opts = {
+            'skip_download': True,
+            'quiet': True,
+            'no_warnings': True,
+            'nocheckcertificate': True,
+            'proxy': proxy,
+            'socket_timeout': 15,
+            'extractor_args': {'youtube': {'player_client': clients}},
+            'http_headers': {'User-Agent': ua},
+        }
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+                if not info:
+                    continue
+                subtitles = info.get('subtitles') or {}
+                auto_subtitles = info.get('automatic_captions') or {}
+                for lang_dict, is_auto in [(subtitles, False), (auto_subtitles, True)]:
+                    langs_to_try = [l for l in priority_langs if l in lang_dict] + [l for l in lang_dict if l not in priority_langs]
+                    for lang in langs_to_try:
+                        formats = lang_dict.get(lang) or []
+                        json3_entry = next((f['url'] for f in formats if f.get('ext') == 'json3'), None)
+                        if json3_entry:
+                            proxies_dict = {'http': proxy, 'https': proxy} if proxy else None
+                            attempts = [proxies_dict, None] if proxy else [None]
+                            for p in attempts:
+                                try:
+                                    headers = {'User-Agent': ua}
+                                    r = requests.get(json3_entry, proxies=p, timeout=10, headers=headers)
+                                    if r.status_code == 200:
+                                        data = r.json()
+                                        events = data.get('events', [])
+                                        result = []
+                                        for ev in events:
+                                            segs = ev.get('segs', [])
+                                            text = ''.join(s.get('utf8', '') for s in segs).strip()
+                                            if text:
+                                                start = ev.get('tStartMs', 0) / 1000.0
+                                                dur = ev.get('dDurationMs', 0) / 1000.0
+                                                result.append({'text': text, 'start': start, 'duration': dur})
+                                        if result:
+                                            logger.info(f"Transcript fetched via yt-dlp (lang={lang}, clients={clients})")
+                                            return result
+                                except Exception:
+                                    continue
+        except Exception as e:
+            logger.warning(f"yt-dlp subtitle extraction failed (clients={clients}): {e}")
+            continue
     return []
 
 def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None, on_progress: Optional[Callable[[str, str, int], None]] = None) -> List[dict]:
