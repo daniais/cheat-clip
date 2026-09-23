@@ -526,6 +526,127 @@ def get_supadata_usage_data(force: bool = False) -> dict:
     _supadata_usage_cache = {"data": res, "timestamp": now}
     return res
 
+def fetch_transcript_innertube(video_id: str) -> List[dict]:
+    """Fetch transcript using YouTube Innertube API with Android client context.
+    This bypasses IP blocks that affect the web-based YouTubeTranscriptApi."""
+    import xml.etree.ElementTree as ET
+    import random
+
+    android_clients = [
+        {"clientName": "ANDROID", "clientVersion": "19.09.37", "androidSdkVersion": 30},
+        {"clientName": "ANDROID_MUSIC", "clientVersion": "6.42.3", "androidSdkVersion": 30},
+        {"clientName": "ANDROID_CREATOR", "clientVersion": "23.39.3", "androidSdkVersion": 30},
+        {"clientName": "ANDROID_VR", "clientVersion": "1.62.1", "androidSdkVersion": 30},
+        {"clientName": "ANDROID_TESTSUITE", "clientVersion": "1.9", "androidSdkVersion": 30},
+    ]
+
+    user_agents = [
+        "com.google.android.youtube/19.09.37 (Linux; U; Android 14) gzip",
+        "com.google.android.youtube/19.45.36 (Linux; U; Android 13) gzip",
+        "com.google.android.apps.youtube.music/6.42.3 (Linux; U; Android 14) gzip",
+        "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.6099.230 Mobile Safari/537.36",
+    ]
+
+    priority_langs = ['id', 'en', 'es', 'pt', 'fr', 'de', 'ja', 'ko', 'zh-Hans', 'zh-Hant', 'ar', 'hi', 'ru']
+
+    for client in android_clients:
+        ua = random.choice(user_agents)
+        payload = {
+            "context": {
+                "client": {
+                    **client,
+                    "hl": "en",
+                    "gl": "US",
+                    "utcOffsetMinutes": 0,
+                }
+            },
+            "videoId": video_id,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": ua,
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "X-YouTube-Client-Name": str(client.get("clientName", "ANDROID")),
+            "X-YouTube-Client-Version": client.get("clientVersion", ""),
+        }
+        try:
+            resp = requests.post(
+                "https://www.youtube.com/youtubei/v1/player",
+                json=payload,
+                headers=headers,
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            # Extract caption tracks
+            tracks = (
+                data.get("captions", {})
+                .get("playerCaptionsTracklistRenderer", {})
+                .get("captionTracks", [])
+            )
+            if not tracks:
+                continue
+            # Pick best language
+            selected = None
+            for lang in priority_langs:
+                selected = next((t for t in tracks if t.get("languageCode") == lang), None)
+                if selected:
+                    break
+            if not selected:
+                selected = tracks[0]
+            base_url = selected.get("baseUrl", "")
+            if not base_url:
+                continue
+            # Always use JSON3 format if available
+            if "&fmt=" not in base_url and "?fmt=" not in base_url:
+                base_url += "&fmt=json3"
+            # Fetch captions
+            cap_headers = {"User-Agent": ua}
+            cap_resp = requests.get(base_url, headers=cap_headers, timeout=15)
+            if cap_resp.status_code != 200:
+                continue
+            # Parse JSON3
+            ct = cap_resp.headers.get("content-type", "")
+            if "json" in ct or base_url.endswith("json3"):
+                try:
+                    cap_data = cap_resp.json()
+                    events = cap_data.get("events", [])
+                    result = []
+                    for ev in events:
+                        segs = ev.get("segs", [])
+                        text = "".join(s.get("utf8", "") for s in segs).strip()
+                        if text:
+                            start = ev.get("tStartMs", 0) / 1000.0
+                            dur = ev.get("dDurationMs", 0) / 1000.0
+                            result.append({"text": text, "start": round(start, 2), "duration": max(0.1, round(dur, 2))})
+                    if result:
+                        logger.info(f"Transcript fetched via Innertube (client={client['clientName']}, lang={selected.get('languageCode')})")
+                        return result
+                except Exception:
+                    pass
+            # Fallback: parse XML
+            try:
+                root = ET.fromstring(cap_resp.text)
+                result = []
+                for text_elem in root.iter("text"):
+                    text = text_elem.text or ""
+                    text = html.unescape(text.strip())
+                    if text:
+                        start = float(text_elem.get("start", "0"))
+                        dur = float(text_elem.get("dur", "0"))
+                        result.append({"text": text, "start": round(start, 2), "duration": max(0.1, round(dur, 2))})
+                if result:
+                    return result
+            except ET.ParseError:
+                pass
+        except Exception as e:
+            logger.warning(f"Innertube transcript failed (client={client['clientName']}): {e}")
+            continue
+    return []
+
+
 def fetch_transcript_ytdlp(video_id: str, proxy: Optional[str] = None) -> List[dict]:
     import requests
     import random
@@ -606,6 +727,14 @@ def fetch_transcript(video_id: str, custom_proxy: Optional[str] = None, on_progr
     proxy_url = custom_proxy or get_proxy_url()
     proxy_cfg = get_youtube_transcript_proxy_config(custom_proxy)
     attempt_history: List[str] = []
+    # Tier 0: YouTube Innertube API with Android client — completely different
+    # endpoint from web API, rarely blocked even on datacenter IPs
+    notify("Tier 0/7: YouTube Innertube API", "Trying Innertube Android API...", 25)
+    innertube_data = fetch_transcript_innertube(video_id)
+    if innertube_data:
+        logger.info("Transcript fetched via Innertube API (Tier 0)")
+        return innertube_data
+    attempt_history.append("Tier 0: No captions via Innertube")
     if keys:
         logger.info(f"[Tier 1] Attempting Supadata API ({len(keys)} keys)...")
         notify("Tier 1/7: Supadata Cloud API", f"Trying Supadata API ({len(keys)} keys)...", 30)
